@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -41,7 +42,9 @@ def _sign(payload: bytes, secret: str) -> str:
 @pytest.fixture(autouse=True)
 def _set_env(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", TEST_SECRET)
-    # Clear the lru_cache so Settings picks up the test env var
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key")
+    monkeypatch.setenv("GITHUB_TOKEN", "fake-token")
+    # Clear the lru_cache so Settings picks up the test env vars
     from pr_review_agent.main import get_settings
 
     get_settings.cache_clear()
@@ -63,15 +66,19 @@ def test_health(client: TestClient):
 def test_pr_opened_returns_received(client: TestClient):
     body = json.dumps(SAMPLE_PR_PAYLOAD).encode()
     signature = _sign(body, TEST_SECRET)
-    response = client.post(
-        "/webhook/github",
-        content=body,
-        headers={
-            "X-GitHub-Event": "pull_request",
-            "X-Hub-Signature-256": signature,
-            "Content-Type": "application/json",
-        },
-    )
+    with patch(
+        "pr_review_agent.main._run_triage_background",
+        new_callable=AsyncMock,
+    ):
+        response = client.post(
+            "/webhook/github",
+            content=body,
+            headers={
+                "X-GitHub-Event": "pull_request",
+                "X-Hub-Signature-256": signature,
+                "Content-Type": "application/json",
+            },
+        )
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "received"

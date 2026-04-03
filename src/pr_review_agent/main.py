@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from functools import lru_cache
 from typing import Annotated
@@ -9,7 +10,7 @@ from fastapi import Depends, FastAPI, Header, Request
 from pydantic import Field
 from pydantic_settings import BaseSettings
 
-from pr_review_agent.models import GitHubWebhookPayload
+from pr_review_agent.models import GitHubPullRequest, GitHubRepo, GitHubWebhookPayload
 from pr_review_agent.security import verify_webhook_signature
 
 load_dotenv()
@@ -25,6 +26,8 @@ class Settings(BaseSettings):
     github_webhook_secret: str = Field(
         description="Secret for verifying GitHub webhook signatures"
     )
+    anthropic_api_key: str = Field(description="Anthropic API key for the triage agent")
+    github_token: str = Field(description="GitHub token for fetching PR details")
 
 
 @lru_cache
@@ -70,6 +73,15 @@ async def github_webhook(
         pr.html_url,
     )
 
+    settings = get_settings()
+    asyncio.create_task(
+        _run_triage_background(
+            pr=pr,
+            repo=payload.repository,
+            github_token=settings.github_token,
+        )
+    )
+
     return {
         "status": "received",
         "pr_number": str(pr.number),
@@ -77,3 +89,27 @@ async def github_webhook(
         "author": pr.user.login,
         "url": pr.html_url,
     }
+
+
+async def _run_triage_background(
+    pr: GitHubPullRequest,
+    repo: GitHubRepo,
+    github_token: str,
+) -> None:
+    """Background task: run triage and log the result."""
+    from pr_review_agent.triage import run_triage
+
+    try:
+        result = await run_triage(pr=pr, repo=repo, github_token=github_token)
+        logger.info(
+            "Triage result for PR #%d: should_review=%s priority=%s "
+            "risk_level=%s tags=%s reason=%s",
+            pr.number,
+            result.should_review,
+            result.priority,
+            result.risk_level,
+            result.tags,
+            result.reason,
+        )
+    except Exception:
+        logger.exception("Triage failed for PR #%d", pr.number)

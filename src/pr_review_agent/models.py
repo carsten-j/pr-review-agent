@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -39,3 +41,19 @@ class GitHubWebhookPayload(BaseModel):
     pull_request: GitHubPullRequest = Field(alias="pull_request")
     repository: GitHubRepo
     sender: GitHubUser
+
+
+class ChangedFile(BaseModel):
+    filename: str
+    status: str
+    additions: int
+    deletions: int
+    changes: int
+
+
+class TriageResult(BaseModel):
+    should_review: bool
+    priority: Literal["normal", "urgent"]
+    risk_level: Literal["low", "medium", "high", "critical"]
+    reason: str
+    tags: list[str]

@@ -1,12 +1,14 @@
 # PR Review Agent
 
-A GitHub PR review agent powered by Pydantic AI and Anthropic. Currently in **Phase 1**: a FastAPI webhook receiver that detects new pull requests on GitHub and logs them.
+A GitHub PR review agent powered by Pydantic AI and Anthropic. A FastAPI webhook receiver that detects new pull requests on GitHub, triages them using Claude Haiku 4.5, and logs the assessment.
 
 ## Prerequisites
 
 - Python 3.12+
 - [uv](https://docs.astral.sh/uv/) — fast Python package manager
 - A [GitHub](https://github.com) account
+- A GitHub personal access token (needs `public_repo` scope, or `repo` for private repos)
+- An [Anthropic](https://console.anthropic.com/) API key
 - [ngrok](https://ngrok.com) — for exposing your local server to GitHub webhooks
 
 ## Quick start
@@ -21,10 +23,11 @@ uv sync
 
 # Create your .env file
 cp .env.example .env
-# Edit .env and set GITHUB_WEBHOOK_SECRET to a strong random value.
-# You'll use this same secret when configuring the webhook on GitHub (see below).
-# Generate one with:
-#   python -c "import secrets; print(secrets.token_hex(32))"
+# Edit .env and set:
+#   GITHUB_WEBHOOK_SECRET — a strong random value (used for both .env and GitHub webhook config)
+#     Generate one with: python -c "import secrets; print(secrets.token_hex(32))"
+#   ANTHROPIC_API_KEY — your Anthropic API key
+#   GITHUB_TOKEN — a GitHub personal access token
 
 # Start the server
 uv run uvicorn pr_review_agent.main:app --reload
@@ -128,25 +131,55 @@ This sends a fake PR webhook with a valid HMAC signature to your local server.
 2. Start ngrok (`ngrok http 8000`)
 3. Configure the webhook on GitHub (see above)
 4. Open a PR on the test repo
-5. Watch the server logs — you should see the PR details logged
+5. Watch the server logs — you should see the PR details logged, followed by the triage result
+
+### Run integration tests
+
+Integration tests call the real Anthropic API and are skipped by default. To run them:
+
+```bash
+uv run pytest -m integration
+```
+
+Requires `ANTHROPIC_API_KEY` to be set in your environment.
 
 ## Architecture
 
 ```
 src/pr_review_agent/
-├── main.py       # FastAPI app — webhook endpoint + health check
-├── models.py     # Pydantic models for GitHub webhook payloads
-└── security.py   # HMAC-SHA256 signature verification
+├── main.py            # FastAPI app — webhook endpoint + health check
+├── models.py          # Pydantic models for GitHub payloads and triage output
+├── security.py        # HMAC-SHA256 signature verification
+├── triage.py          # Pydantic AI triage agent (Claude Haiku 4.5)
+└── github_client.py   # GitHub API client for fetching PR changed files
 ```
 
-- **`main.py`** — Receives `POST /webhook/github`, verifies the signature, filters for `pull_request` events with `action: opened`, and logs the PR details.
-- **`models.py`** — Typed Pydantic models for the subset of the GitHub webhook payload we care about.
+- **`main.py`** — Receives `POST /webhook/github`, verifies the signature, filters for `pull_request` events with `action: opened`, logs the PR details, and fires off a background triage task.
+- **`models.py`** — Typed Pydantic models for GitHub webhook payloads, changed files, and the `TriageResult` output schema.
 - **`security.py`** — Verifies the `X-Hub-Signature-256` header using the shared secret. Implemented as a FastAPI dependency.
+- **`triage.py`** — Pydantic AI agent using Claude Haiku 4.5. Takes PR metadata and changed file list, produces a structured `TriageResult` with should_review, priority, risk_level, reason, and tags.
+- **`github_client.py`** — Fetches the list of changed files for a PR from the GitHub API.
+
+### Triage flow
+
+1. GitHub sends a `pull_request` webhook event
+2. The webhook handler validates the signature and filters for `action: opened`
+3. A background task is created via `asyncio.create_task` (webhook returns 200 immediately)
+4. The background task fetches the PR's changed files from the GitHub API
+5. The triage agent assesses the PR and logs the result
+
+### Triage output
+
+The agent produces a `TriageResult` with:
+
+- **should_review** — Should a human review this PR?
+- **priority** — `normal` or `urgent`
+- **risk_level** — `low`, `medium`, `high`, or `critical`
+- **reason** — 1-2 sentence explanation
+- **tags** — Labels like `security`, `feature`, `bugfix`, `breaking-change`, etc.
 
 ## What's next
 
-Phase 2 will wire up a Pydantic AI review agent (using Anthropic's Claude) that:
-
-- Fetches the PR diff and file context
-- Produces a structured review (risk classification, inline comments, architectural observations)
-- Posts review comments back to GitHub
+- Post triage results as comments on the PR
+- Add a full review agent (Claude Sonnet) for detailed code review
+- Add Bitbucket webhook support
