@@ -3,7 +3,12 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from pr_review_agent.github_client import get_pr_changed_files
+from pr_review_agent.github_client import (
+    get_file_content,
+    get_pr_changed_files,
+    get_pr_diff,
+    search_code,
+)
 
 SAMPLE_FILES_RESPONSE = [
     {
@@ -22,6 +27,17 @@ SAMPLE_FILES_RESPONSE = [
         "changes": 4,
     },
 ]
+
+SAMPLE_DIFF = "diff --git a/src/main.py b/src/main.py\n+print('hello')"
+
+SAMPLE_SEARCH_RESPONSE = {
+    "items": [
+        {
+            "path": "src/main.py",
+            "text_matches": [{"fragment": "def hello():"}],
+        }
+    ]
+}
 
 
 @pytest.fixture
@@ -69,3 +85,64 @@ async def test_get_pr_changed_files_api_error(monkeypatch: pytest.MonkeyPatch):
             pr_number=1,
             github_token="fake-token",
         )
+
+
+async def test_get_pr_diff(monkeypatch: pytest.MonkeyPatch):
+    async def mock_get(self, url, **kwargs):
+        return httpx.Response(
+            status_code=200,
+            text=SAMPLE_DIFF,
+            request=httpx.Request("GET", url),
+        )
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", mock_get)
+
+    diff = await get_pr_diff(
+        owner="carsten-j",
+        repo="pr-review-test-repo",
+        pr_number=42,
+        github_token="fake-token",
+    )
+    assert "diff --git" in diff
+    assert "+print('hello')" in diff
+
+
+async def test_get_file_content(monkeypatch: pytest.MonkeyPatch):
+    async def mock_get(self, url, **kwargs):
+        return httpx.Response(
+            status_code=200,
+            text="print('hello')\n",
+            request=httpx.Request("GET", url),
+        )
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", mock_get)
+
+    content = await get_file_content(
+        owner="carsten-j",
+        repo="pr-review-test-repo",
+        path="src/main.py",
+        ref="abc123",
+        github_token="fake-token",
+    )
+    assert content == "print('hello')\n"
+
+
+async def test_search_code(monkeypatch: pytest.MonkeyPatch):
+    async def mock_get(self, url, **kwargs):
+        return httpx.Response(
+            status_code=200,
+            json=SAMPLE_SEARCH_RESPONSE,
+            request=httpx.Request("GET", url),
+        )
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", mock_get)
+
+    results = await search_code(
+        owner="carsten-j",
+        repo="pr-review-test-repo",
+        query="hello",
+        github_token="fake-token",
+    )
+    assert len(results) == 1
+    assert results[0].path == "src/main.py"
+    assert "def hello():" in results[0].matched_lines

@@ -28,6 +28,10 @@ class Settings(BaseSettings):
     )
     anthropic_api_key: str = Field(description="Anthropic API key for the triage agent")
     github_token: str = Field(description="GitHub token for fetching PR details")
+    reviewer_role: str = Field(
+        default="senior-dev",
+        description="Reviewer persona for the general review agent",
+    )
 
 
 @lru_cache
@@ -96,20 +100,57 @@ async def _run_triage_background(
     repo: GitHubRepo,
     github_token: str,
 ) -> None:
-    """Background task: run triage and log the result."""
+    """Background task: run triage, then review if needed."""
+    from pr_review_agent.github_client import get_pr_changed_files
+    from pr_review_agent.review import run_review
     from pr_review_agent.triage import run_triage
 
     try:
-        result = await run_triage(pr=pr, repo=repo, github_token=github_token)
+        triage_result = await run_triage(pr=pr, repo=repo, github_token=github_token)
         logger.info(
             "Triage result for PR #%d: should_review=%s priority=%s "
             "risk_level=%s tags=%s reason=%s",
             pr.number,
-            result.should_review,
-            result.priority,
-            result.risk_level,
-            result.tags,
-            result.reason,
+            triage_result.should_review,
+            triage_result.priority,
+            triage_result.risk_level,
+            triage_result.tags,
+            triage_result.reason,
         )
+
+        if not triage_result.should_review:
+            logger.info("PR #%d: triage says skip review", pr.number)
+            return
+
+        owner, repo_name = repo.full_name.split("/", 1)
+        changed_files = await get_pr_changed_files(
+            owner, repo_name, pr.number, github_token
+        )
+
+        review = await run_review(
+            pr=pr,
+            repo=repo,
+            github_token=github_token,
+            triage_result=triage_result,
+            changed_files=changed_files,
+        )
+        logger.info(
+            "Review for PR #%d: risk=%s approve=%s comments=%d "
+            "architectural_observations=%d learning_points=%d",
+            pr.number,
+            review.risk_level,
+            review.approve,
+            len(review.comments),
+            len(review.architectural_observations),
+            len(review.learning_points),
+        )
+        for comment in review.comments:
+            logger.info(
+                "  [%s] %s:%d — %s",
+                comment.severity,
+                comment.file_path,
+                comment.line_start,
+                comment.comment,
+            )
     except Exception:
-        logger.exception("Triage failed for PR #%d", pr.number)
+        logger.exception("Pipeline failed for PR #%d", pr.number)

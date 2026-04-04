@@ -57,3 +57,44 @@ class TriageResult(BaseModel):
     risk_level: Literal["low", "medium", "high", "critical"]
     reason: str
     tags: list[str]
+
+
+class CodeSearchResult(BaseModel):
+    path: str
+    matched_lines: list[str]
+
+
+class ReviewComment(BaseModel):
+    file_path: str
+    line_start: int
+    line_end: int | None = None
+    severity: Literal["info", "warning", "error", "critical"]
+    category: str = Field(
+        description="e.g. 'security', 'naming', 'error-handling', 'performance', 'test-coverage'"
+    )
+    comment: str
+    suggestion: str | None = Field(
+        default=None, description="Concrete code suggestion if applicable"
+    )
+
+
+class ArchitecturalObservation(BaseModel):
+    pattern: str = Field(description="e.g. 'missing-error-handling', 'tight-coupling'")
+    description: str
+    affected_files: list[str]
+
+
+class PRReview(BaseModel):
+    summary: str = Field(
+        description="2-3 sentence summary of the PR's intent and quality"
+    )
+    risk_level: Literal["low", "medium", "high", "critical"]
+    comments: list[ReviewComment]
+    architectural_observations: list[ArchitecturalObservation] = Field(
+        default_factory=list
+    )
+    learning_points: list[str] = Field(
+        default_factory=list,
+        description="Key takeaways for junior developers",
+    )
+    approve: bool = Field(description="Whether the PR is safe to merge as-is")

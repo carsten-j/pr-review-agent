@@ -1,6 +1,6 @@
 # PR Review Agent
 
-A GitHub PR review agent powered by Pydantic AI and Anthropic. A FastAPI webhook receiver that detects new pull requests on GitHub, triages them using Claude Haiku 4.5, and logs the assessment.
+A GitHub PR review agent powered by Pydantic AI and Anthropic. A FastAPI webhook receiver that detects new pull requests on GitHub, triages them using Claude Haiku 4.5, and runs an automated code review using Claude Sonnet 4.5.
 
 ## Prerequisites
 
@@ -28,6 +28,7 @@ cp .env.example .env
 #     Generate one with: python -c "import secrets; print(secrets.token_hex(32))"
 #   ANTHROPIC_API_KEY — your Anthropic API key
 #   GITHUB_TOKEN — a GitHub personal access token
+#   REVIEWER_ROLE — reviewer persona for the general agent (default: senior-dev)
 
 # Start the server
 uv run uvicorn pr_review_agent.main:app --reload
@@ -131,7 +132,7 @@ This sends a fake PR webhook with a valid HMAC signature to your local server.
 2. Start ngrok (`ngrok http 8000`)
 3. Configure the webhook on GitHub (see above)
 4. Open a PR on the test repo
-5. Watch the server logs — you should see the PR details logged, followed by the triage result
+5. Watch the server logs — you should see the triage result followed by the code review output
 
 ### Run integration tests
 
@@ -147,39 +148,55 @@ Requires `ANTHROPIC_API_KEY` to be set in your environment.
 
 ```
 src/pr_review_agent/
-├── main.py            # FastAPI app — webhook endpoint + health check
-├── models.py          # Pydantic models for GitHub payloads and triage output
+├── main.py            # FastAPI app — webhook endpoint, settings, background pipeline
+├── models.py          # Pydantic models for GitHub payloads, triage, and review output
 ├── security.py        # HMAC-SHA256 signature verification
 ├── triage.py          # Pydantic AI triage agent (Claude Haiku 4.5)
-└── github_client.py   # GitHub API client for fetching PR changed files
+├── review.py          # Code review agents — security + general (Claude Sonnet 4.5)
+└── github_client.py   # GitHub API client (changed files, diffs, file content, code search)
 ```
 
-- **`main.py`** — Receives `POST /webhook/github`, verifies the signature, filters for `pull_request` events with `action: opened`, logs the PR details, and fires off a background triage task.
-- **`models.py`** — Typed Pydantic models for GitHub webhook payloads, changed files, and the `TriageResult` output schema.
+- **`main.py`** — Receives `POST /webhook/github`, verifies the signature, filters for `pull_request` events with `action: opened`, logs the PR details, and fires off a background pipeline (triage → review).
+- **`models.py`** — Typed Pydantic models for GitHub webhook payloads, changed files, `TriageResult`, and `PRReview` output schemas.
 - **`security.py`** — Verifies the `X-Hub-Signature-256` header using the shared secret. Implemented as a FastAPI dependency.
 - **`triage.py`** — Pydantic AI agent using Claude Haiku 4.5. Takes PR metadata and changed file list, produces a structured `TriageResult` with should_review, priority, risk_level, reason, and tags.
-- **`github_client.py`** — Fetches the list of changed files for a PR from the GitHub API.
+- **`review.py`** — Two Pydantic AI review agents using Claude Sonnet 4.5. A security reviewer runs when triage tags include "security", otherwise a general reviewer runs (configurable via `REVIEWER_ROLE`). Both produce a structured `PRReview` with line-specific comments, architectural observations, and an approve/reject decision.
+- **`github_client.py`** — Async GitHub API client for fetching PR changed files, unified diffs, file content at a specific ref, and code search.
 
-### Triage flow
+### Pipeline flow
 
 1. GitHub sends a `pull_request` webhook event
 2. The webhook handler validates the signature and filters for `action: opened`
 3. A background task is created via `asyncio.create_task` (webhook returns 200 immediately)
 4. The background task fetches the PR's changed files from the GitHub API
-5. The triage agent assesses the PR and logs the result
+5. The triage agent assesses the PR and produces a `TriageResult`
+6. If `should_review` is false, the pipeline stops
+7. Based on triage tags, either the security or general review agent runs
+8. The review agent fetches the diff, reads files for context, and searches the codebase as needed
+9. The agent produces a structured `PRReview` with line-specific comments, which is logged
 
 ### Triage output
 
-The agent produces a `TriageResult` with:
+The triage agent produces a `TriageResult` with:
 
-- **should_review** — Should a human review this PR?
+- **should_review** — Should a review agent look at this PR?
 - **priority** — `normal` or `urgent`
 - **risk_level** — `low`, `medium`, `high`, or `critical`
 - **reason** — 1-2 sentence explanation
 - **tags** — Labels like `security`, `feature`, `bugfix`, `breaking-change`, etc.
 
+### Review output
+
+The review agent produces a `PRReview` with:
+
+- **summary** — 2-3 sentence summary of the PR's intent and quality
+- **risk_level** — `low`, `medium`, `high`, or `critical`
+- **comments** — Line-specific review comments with severity, category, and optional code suggestions
+- **architectural_observations** — Higher-level patterns and concerns across files
+- **learning_points** — Key takeaways for junior developers
+- **approve** — Whether the PR is safe to merge as-is
+
 ## What's next
 
-- Post triage results as comments on the PR
-- Add a full review agent (Claude Sonnet) for detailed code review
+- Post review comments as inline PR comments on GitHub
 - Add Bitbucket webhook support
