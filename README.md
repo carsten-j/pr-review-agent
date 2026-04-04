@@ -151,29 +151,30 @@ src/pr_review_agent/
 ├── main.py            # FastAPI app — webhook endpoint, settings, background pipeline
 ├── models.py          # Pydantic models for GitHub payloads, triage, and review output
 ├── security.py        # HMAC-SHA256 signature verification
+├── git_platform.py    # GitPlatformClient protocol and RepoDeps dataclass
+├── github_client.py   # GitHubClient — implements GitPlatformClient via httpx
 ├── triage.py          # Pydantic AI triage agent (Claude Haiku 4.5)
-├── review.py          # Code review agents — security + general (Claude Sonnet 4.5)
-└── github_client.py   # GitHub API client (changed files, diffs, file content, code search)
+└── review.py          # Code review agents — security + general (Claude Sonnet 4.5)
 ```
 
 - **`main.py`** — Receives `POST /webhook/github`, verifies the signature, filters for `pull_request` events with `action: opened`, logs the PR details, and fires off a background pipeline (triage → review).
 - **`models.py`** — Typed Pydantic models for GitHub webhook payloads, changed files, `TriageResult`, and `PRReview` output schemas.
 - **`security.py`** — Verifies the `X-Hub-Signature-256` header using the shared secret. Implemented as a FastAPI dependency.
-- **`triage.py`** — Pydantic AI agent using Claude Haiku 4.5. Takes PR metadata and changed file list, produces a structured `TriageResult` with should_review, priority, risk_level, reason, and tags.
-- **`review.py`** — Two Pydantic AI review agents using Claude Sonnet 4.5. A security reviewer runs when triage tags include "security", otherwise a general reviewer runs (configurable via `REVIEWER_ROLE`). Both produce a structured `PRReview` with line-specific comments, architectural observations, and an approve/reject decision.
-- **`github_client.py`** — Async GitHub API client for fetching PR changed files, unified diffs, file content at a specific ref, and code search.
+- **`git_platform.py`** — Defines the `GitPlatformClient` Protocol (abstract interface) and the `RepoDeps` dataclass that bundles `git_client`, `workspace`, `repo_slug`, and `pr_id`. Designed to support Bitbucket or other platforms in the future.
+- **`github_client.py`** — `GitHubClient` implementation of `GitPlatformClient`. Owns a shared `httpx.AsyncClient` for connection pooling. Supports a configurable `base_url` for GitHub Enterprise Server.
+- **`triage.py`** — Pydantic AI agent using Claude Haiku 4.5. Takes PR metadata and changed file list, produces a structured `TriageResult` with should_review, priority, risk_level, reason, and tags. Uses `TriageDeps(RepoDeps)`.
+- **`review.py`** — Two Pydantic AI review agents using Claude Sonnet 4.5. A security reviewer runs when triage tags include "security", otherwise a general reviewer runs (persona configured via `REVIEWER_ROLE` setting). Both share the same tools (`fetch_pr_diff`, `fetch_file_content`, `search_repo_code`) and produce a structured `PRReview`. Uses `ReviewDeps(RepoDeps)`.
 
 ### Pipeline flow
 
 1. GitHub sends a `pull_request` webhook event
 2. The webhook handler validates the signature and filters for `action: opened`
 3. A background task is created via `asyncio.create_task` (webhook returns 200 immediately)
-4. The background task fetches the PR's changed files from the GitHub API
-5. The triage agent assesses the PR and produces a `TriageResult`
-6. If `should_review` is false, the pipeline stops
-7. Based on triage tags, either the security or general review agent runs
-8. The review agent fetches the diff, reads files for context, and searches the codebase as needed
-9. The agent produces a structured `PRReview` with line-specific comments, which is logged
+4. The triage agent fetches changed files and assesses the PR, producing a `TriageResult`
+5. If `should_review` is false, the pipeline stops
+6. The review agent fetches changed files again, then based on triage tags either the security or general reviewer runs
+7. The review agent fetches the diff, reads files for context, and searches the codebase as needed
+8. The agent produces a structured `PRReview` with line-specific comments, which is logged
 
 ### Triage output
 
@@ -199,4 +200,4 @@ The review agent produces a `PRReview` with:
 ## What's next
 
 - Post review comments as inline PR comments on GitHub
-- Add Bitbucket webhook support
+- Add Bitbucket support (the `GitPlatformClient` abstraction is already in place)

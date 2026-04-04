@@ -34,21 +34,23 @@ FastAPI webhook receiver → triage agent → review agent pipeline, all using P
 
 **Pipeline flow:** GitHub webhook (`POST /webhook/github`) → signature verification → background task → triage (Haiku 4.5) → if `should_review` → code review (Sonnet 4.5) → log results.
 
-**Two review agents** in `review.py`: `security_review_agent` runs when triage tags include "security", otherwise `general_review_agent` runs. Both share the same tool set (`get_pr_diff`, `get_file_content`, `search_code`) registered via `_register_tools()`. The general agent's persona is configured via `REVIEWER_ROLE` env var.
+**Two review agents** in `review.py`: `security_review_agent` runs when triage tags include "security", otherwise `general_review_agent` runs. Both share the same tool list (`fetch_pr_diff`, `fetch_file_content`, `search_repo_code`) passed via `tools=[...]` in the `Agent` constructor. The general agent's persona is injected at request time via `@general_review_agent.instructions` reading `ctx.deps.reviewer_role`.
 
-**Dependency injection pattern:** Each agent defines a `*Deps` dataclass (`TriageDeps`, `ReviewDeps`) passed through `RunContext`. Tools access GitHub token, PR metadata, and repo info from `ctx.deps`.
+**Dependency injection pattern:** Each agent defines a `*Deps` dataclass (`TriageDeps`, `ReviewDeps`) passed through `RunContext`. Both extend `RepoDeps` (from `git_platform.py`) which carries `git_client`, `workspace`, `repo_slug`, and `pr_id`. Tools access all fields directly from `ctx.deps`.
 
-**Settings:** `pydantic-settings` `BaseSettings` in `main.py`, populated from env vars (`.env` loaded via `python-dotenv`).
+**Git platform abstraction:** `git_platform.py` defines the `GitPlatformClient` Protocol and `RepoDeps` dataclass. `github_client.py` provides the `GitHubClient` implementation (owns a shared `httpx.AsyncClient`, configurable `base_url` for GitHub Enterprise).
+
+**Settings:** `pydantic-settings` `BaseSettings` in `main.py`, populated from env vars (`.env` loaded via `python-dotenv`). Key settings: `github_token`, `github_api_base`, `reviewer_role`.
 
 **Webhook security:** `security.py` provides HMAC-SHA256 verification as a FastAPI dependency. The `verify_webhook_signature` dependency imports `get_settings` from `main.py` at call time to avoid circular imports.
 
 ## Testing patterns
 
-- Unit tests use `monkeypatch` to mock `httpx.AsyncClient.get` for GitHub API calls
+- `GitHubClient` tests mock `httpx.AsyncClient.get` directly (the client holds a shared instance)
 - Agent tests use `agent.override(model=TestModel())` context manager — never set `agent.model` directly
+- Review and triage tests use a `FakeGitClient` class passed as `git_client=` — no monkeypatching needed
 - Integration tests are marked `@pytest.mark.integration` and excluded by default (`addopts = "-m 'not integration'"` in pyproject.toml)
 - All tests are async (`asyncio_mode = "auto"`)
-- GitHub client mocks in review tests patch `pr_review_agent.github_client.*` functions, not httpx
 
 ## Key type suppressions
 

@@ -88,6 +88,7 @@ async def github_webhook(
             repo=payload.repository,
             github_token=settings.github_token,
             github_api_base=settings.github_api_base,
+            reviewer_role=settings.reviewer_role,
         )
     )
 
@@ -105,6 +106,7 @@ async def _run_triage_background(
     repo: GitHubRepo,
     github_token: str,
     github_api_base: str,
+    reviewer_role: str = "senior-dev",
 ) -> None:
     """Background task: run triage, then review if needed."""
     from pr_review_agent.github_client import GitHubClient
@@ -140,6 +142,7 @@ async def _run_triage_background(
             git_client=git_client,
             triage_result=triage_result,
             changed_files=changed_files,
+            reviewer_role=reviewer_role,
         )
         logger.info(
             "Review for PR #%d: risk=%s approve=%s comments=%d "
