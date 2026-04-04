@@ -25,13 +25,13 @@ if not SECRET:
 payload = {
     "action": "opened",
     "pull_request": {
-        "number": 1,
+        "number": 3,
         "title": "Test PR from simulation script",
         "body": "This is a simulated PR to verify the webhook receiver works.",
         "state": "open",
         "user": {"login": "simulator", "id": 99999},
-        "html_url": f"{BASE_URL}/fake-pr/1",
-        "diff_url": f"{BASE_URL}/fake-pr/1.diff",
+        "html_url": f"{BASE_URL}/fake-pr/4",
+        "diff_url": f"{BASE_URL}/fake-pr/4.diff",
         "head": {"ref": "feature-test", "sha": "aaa111"},
         "base": {"ref": "main", "sha": "bbb222"},
         "created_at": "2026-04-03T12:00:00Z",

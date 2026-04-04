@@ -5,6 +5,7 @@ import logging
 from functools import lru_cache
 from typing import Annotated
 
+import logfire
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, Request
 from pydantic import Field
@@ -14,6 +15,9 @@ from pr_review_agent.models import GitHubPullRequest, GitHubRepo, GitHubWebhookP
 from pr_review_agent.security import verify_webhook_signature
 
 load_dotenv()
+
+logfire.configure()
+logfire.instrument_pydantic_ai()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -115,53 +119,60 @@ async def _run_triage_background(
 
     git_client = GitHubClient(github_token, base_url=github_api_base)
     try:
-        triage_result = await run_triage(pr=pr, repo=repo, git_client=git_client)
-        logger.info(
-            "Triage result for PR #%d: should_review=%s priority=%s "
-            "risk_level=%s tags=%s reason=%s",
-            pr.number,
-            triage_result.should_review,
-            triage_result.priority,
-            triage_result.risk_level,
-            triage_result.tags,
-            triage_result.reason,
-        )
-
-        if not triage_result.should_review:
-            logger.info("PR #%d: triage says skip review", pr.number)
-            return
-
-        owner, repo_name = repo.full_name.split("/", 1)
-        changed_files = await git_client.get_pr_changed_files(
-            owner, repo_name, pr.number
-        )
-
-        review = await run_review(
-            pr=pr,
-            repo=repo,
-            git_client=git_client,
-            triage_result=triage_result,
-            changed_files=changed_files,
-            reviewer_role=reviewer_role,
-        )
-        logger.info(
-            "Review for PR #%d: risk=%s approve=%s comments=%d "
-            "architectural_observations=%d learning_points=%d",
-            pr.number,
-            review.risk_level,
-            review.approve,
-            len(review.comments),
-            len(review.architectural_observations),
-            len(review.learning_points),
-        )
-        for comment in review.comments:
+        with logfire.span(
+            "review PR {repo}#{pr_number}",
+            repo=repo.full_name,
+            pr_number=pr.number,
+            pr_title=pr.title,
+            pr_author=pr.user.login,
+        ):
+            triage_result = await run_triage(pr=pr, repo=repo, git_client=git_client)
             logger.info(
-                "  [%s] %s:%d — %s",
-                comment.severity,
-                comment.file_path,
-                comment.line_start,
-                comment.comment,
+                "Triage result for PR #%d: should_review=%s priority=%s "
+                "risk_level=%s tags=%s reason=%s",
+                pr.number,
+                triage_result.should_review,
+                triage_result.priority,
+                triage_result.risk_level,
+                triage_result.tags,
+                triage_result.reason,
             )
+
+            if not triage_result.should_review:
+                logger.info("PR #%d: triage says skip review", pr.number)
+                return
+
+            owner, repo_name = repo.full_name.split("/", 1)
+            changed_files = await git_client.get_pr_changed_files(
+                owner, repo_name, pr.number
+            )
+
+            review = await run_review(
+                pr=pr,
+                repo=repo,
+                git_client=git_client,
+                triage_result=triage_result,
+                changed_files=changed_files,
+                reviewer_role=reviewer_role,
+            )
+            logger.info(
+                "Review for PR #%d: risk=%s approve=%s comments=%d "
+                "architectural_observations=%d learning_points=%d",
+                pr.number,
+                review.risk_level,
+                review.approve,
+                len(review.comments),
+                len(review.architectural_observations),
+                len(review.learning_points),
+            )
+            for comment in review.comments:
+                logger.info(
+                    "  [%s] %s:%d — %s",
+                    comment.severity,
+                    comment.file_path,
+                    comment.line_start,
+                    comment.comment,
+                )
     except Exception:
         logger.exception("Pipeline failed for PR #%d", pr.number)
     finally:

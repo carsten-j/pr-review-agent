@@ -29,6 +29,7 @@ cp .env.example .env
 #   ANTHROPIC_API_KEY — your Anthropic API key
 #   GITHUB_TOKEN — a GitHub personal access token
 #   REVIEWER_ROLE — reviewer persona for the general agent (default: senior-dev)
+#   LOGFIRE_TOKEN — (optional) write token for Logfire observability
 
 # Start the server
 uv run uvicorn pr_review_agent.main:app --reload
@@ -148,7 +149,7 @@ Requires `ANTHROPIC_API_KEY` to be set in your environment.
 
 ```
 src/pr_review_agent/
-├── main.py            # FastAPI app — webhook endpoint, settings, background pipeline
+├── main.py            # FastAPI app — webhook endpoint, settings, Logfire setup, background pipeline
 ├── models.py          # Pydantic models for GitHub payloads, triage, and review output
 ├── security.py        # HMAC-SHA256 signature verification
 ├── git_platform.py    # GitPlatformClient protocol and RepoDeps dataclass
@@ -157,7 +158,7 @@ src/pr_review_agent/
 └── review.py          # Code review agents — security + general (Claude Sonnet 4.5)
 ```
 
-- **`main.py`** — Receives `POST /webhook/github`, verifies the signature, filters for `pull_request` events with `action: opened`, logs the PR details, and fires off a background pipeline (triage → review).
+- **`main.py`** — Receives `POST /webhook/github`, verifies the signature, filters for `pull_request` events with `action: opened`, logs the PR details, and fires off a background pipeline (triage → review). Configures Logfire at startup via `logfire.configure()` and `logfire.instrument_pydantic_ai()`.
 - **`models.py`** — Typed Pydantic models for GitHub webhook payloads, changed files, `TriageResult`, and `PRReview` output schemas.
 - **`security.py`** — Verifies the `X-Hub-Signature-256` header using the shared secret. Implemented as a FastAPI dependency.
 - **`git_platform.py`** — Defines the `GitPlatformClient` Protocol (abstract interface) and the `RepoDeps` dataclass that bundles `git_client`, `workspace`, `repo_slug`, and `pr_id`. Designed to support Bitbucket or other platforms in the future.
@@ -196,6 +197,17 @@ The review agent produces a `PRReview` with:
 - **architectural_observations** — Higher-level patterns and concerns across files
 - **learning_points** — Key takeaways for junior developers
 - **approve** — Whether the PR is safe to merge as-is
+
+## Observability
+
+The agent is instrumented with [Logfire](https://logfire.pydantic.dev/). When `LOGFIRE_TOKEN` is set, every PR pipeline run appears as a single trace in the Logfire UI — triage agent run, tool calls, model requests, token usage, and the final review, all nested under a `review PR {repo}#{pr_number}` root span.
+
+To enable:
+1. Create a write token at logfire.pydantic.dev → project `pr-review-agent` → Settings → Write tokens
+2. Add `LOGFIRE_TOKEN=<your-token>` to `.env`
+3. Start the server — traces appear in Logfire automatically
+
+Without `LOGFIRE_TOKEN` the app runs normally with no overhead.
 
 ## What's next
 

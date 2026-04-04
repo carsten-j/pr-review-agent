@@ -42,6 +42,8 @@ FastAPI webhook receiver → triage agent → review agent pipeline, all using P
 
 **Settings:** `pydantic-settings` `BaseSettings` in `main.py`, populated from env vars (`.env` loaded via `python-dotenv`). Key settings: `github_token`, `github_api_base`, `reviewer_role`.
 
+**Observability:** Logfire is configured at module level in `main.py` via `logfire.configure()` + `logfire.instrument_pydantic_ai()`. Reads `LOGFIRE_TOKEN` from env automatically — no-op if unset. Each PR pipeline run is wrapped in a `logfire.span("review PR {repo}#{pr_number}", ...)` for searchable audit traces. No changes needed in agent files.
+
 **Webhook security:** `security.py` provides HMAC-SHA256 verification as a FastAPI dependency. The `verify_webhook_signature` dependency imports `get_settings` from `main.py` at call time to avoid circular imports.
 
 ## Testing patterns
