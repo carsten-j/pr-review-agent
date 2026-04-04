@@ -6,6 +6,7 @@ import pytest
 
 from pr_review_agent.models import (
     ChangedFile,
+    CodeSearchResult,
     GitHubBranchRef,
     GitHubPullRequest,
     GitHubRepo,
@@ -73,6 +74,26 @@ def _create_token(username: str) -> str:
 """
 
 
+class FakeGitClient:
+    async def get_pr_diff(self, workspace: str, repo_slug: str, pr_id: int) -> str:
+        return REALISTIC_DIFF
+
+    async def get_file_content(
+        self, workspace: str, repo_slug: str, path: str, ref: str
+    ) -> str:
+        return REALISTIC_FILE_CONTENT
+
+    async def search_code(
+        self, workspace: str, repo_slug: str, query: str
+    ) -> list[CodeSearchResult]:
+        return []
+
+    async def get_pr_changed_files(
+        self, workspace: str, repo_slug: str, pr_id: int
+    ) -> list[ChangedFile]:
+        return []
+
+
 @pytest.fixture
 def sample_pr() -> GitHubPullRequest:
     return GitHubPullRequest(
@@ -134,41 +155,20 @@ def general_triage() -> TriageResult:
     )
 
 
-def _mock_github_tools(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Monkeypatch GitHub client with realistic canned data."""
-
-    async def mock_get_pr_diff(owner, repo, pr_number, github_token):
-        return REALISTIC_DIFF
-
-    async def mock_get_file_content(owner, repo, path, ref, github_token):
-        return REALISTIC_FILE_CONTENT
-
-    async def mock_search_code(owner, repo, query, github_token):
-        return []
-
-    monkeypatch.setattr("pr_review_agent.github_client.get_pr_diff", mock_get_pr_diff)
-    monkeypatch.setattr(
-        "pr_review_agent.github_client.get_file_content", mock_get_file_content
-    )
-    monkeypatch.setattr("pr_review_agent.github_client.search_code", mock_search_code)
-
-
 @pytest.mark.integration
 async def test_security_review_with_real_model(
     sample_pr: GitHubPullRequest,
     sample_repo: GitHubRepo,
     changed_files: list[ChangedFile],
     security_triage: TriageResult,
-    monkeypatch: pytest.MonkeyPatch,
 ):
     """Integration test: security review agent with real Anthropic API."""
     assert os.environ.get("ANTHROPIC_API_KEY"), "ANTHROPIC_API_KEY must be set"
-    _mock_github_tools(monkeypatch)
 
     review = await run_review(
         pr=sample_pr,
         repo=sample_repo,
-        github_token="fake-token",
+        git_client=FakeGitClient(),
         triage_result=security_triage,
         changed_files=changed_files,
     )
@@ -196,16 +196,14 @@ async def test_general_review_with_real_model(
     sample_repo: GitHubRepo,
     changed_files: list[ChangedFile],
     general_triage: TriageResult,
-    monkeypatch: pytest.MonkeyPatch,
 ):
     """Integration test: general review agent with real Anthropic API."""
     assert os.environ.get("ANTHROPIC_API_KEY"), "ANTHROPIC_API_KEY must be set"
-    _mock_github_tools(monkeypatch)
 
     review = await run_review(
         pr=sample_pr,
         repo=sample_repo,
-        github_token="fake-token",
+        git_client=FakeGitClient(),
         triage_result=general_triage,
         changed_files=changed_files,
     )

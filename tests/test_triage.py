@@ -5,6 +5,7 @@ from pydantic_ai.models.test import TestModel
 
 from pr_review_agent.models import (
     ChangedFile,
+    CodeSearchResult,
     GitHubBranchRef,
     GitHubPullRequest,
     GitHubRepo,
@@ -12,6 +13,29 @@ from pr_review_agent.models import (
     TriageResult,
 )
 from pr_review_agent.triage import run_triage, triage_agent
+
+
+class FakeGitClient:
+    def __init__(self, changed_files: list[ChangedFile]) -> None:
+        self._changed_files = changed_files
+
+    async def get_pr_changed_files(
+        self, workspace: str, repo_slug: str, pr_id: int
+    ) -> list[ChangedFile]:
+        return self._changed_files
+
+    async def get_pr_diff(self, workspace: str, repo_slug: str, pr_id: int) -> str:
+        return ""
+
+    async def get_file_content(
+        self, workspace: str, repo_slug: str, path: str, ref: str
+    ) -> str:
+        return ""
+
+    async def search_code(
+        self, workspace: str, repo_slug: str, query: str
+    ) -> list[CodeSearchResult]:
+        return []
 
 
 @pytest.fixture
@@ -57,20 +81,13 @@ async def test_triage_returns_structured_output(
     sample_pr: GitHubPullRequest,
     sample_repo: GitHubRepo,
     sample_changed_files: list[ChangedFile],
-    monkeypatch: pytest.MonkeyPatch,
 ):
     """Test that the triage agent produces a valid TriageResult using TestModel."""
-
-    async def mock_get_files(owner, repo, pr_number, github_token):
-        return sample_changed_files
-
-    monkeypatch.setattr("pr_review_agent.triage.get_pr_changed_files", mock_get_files)
-
     with triage_agent.override(model=TestModel()):
         result = await run_triage(
             pr=sample_pr,
             repo=sample_repo,
-            github_token="fake-token",
+            git_client=FakeGitClient(sample_changed_files),
         )
 
     assert isinstance(result, TriageResult)

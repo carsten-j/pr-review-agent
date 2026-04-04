@@ -3,12 +3,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from pr_review_agent.github_client import (
-    get_file_content,
-    get_pr_changed_files,
-    get_pr_diff,
-    search_code,
-)
+from pr_review_agent.github_client import GitHubClient
 
 SAMPLE_FILES_RESPONSE = [
     {
@@ -55,11 +50,11 @@ def mock_github_api(monkeypatch: pytest.MonkeyPatch):
 
 
 async def test_get_pr_changed_files(mock_github_api):
-    files = await get_pr_changed_files(
-        owner="carsten-j",
-        repo="pr-review-test-repo",
-        pr_number=42,
-        github_token="fake-token",
+    client = GitHubClient("fake-token")
+    files = await client.get_pr_changed_files(
+        workspace="carsten-j",
+        repo_slug="pr-review-test-repo",
+        pr_id=42,
     )
     assert len(files) == 2
     assert files[0].filename == "src/main.py"
@@ -78,12 +73,12 @@ async def test_get_pr_changed_files_api_error(monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setattr(httpx.AsyncClient, "get", mock_get)
 
+    client = GitHubClient("fake-token")
     with pytest.raises(httpx.HTTPStatusError):
-        await get_pr_changed_files(
-            owner="carsten-j",
-            repo="nonexistent",
-            pr_number=1,
-            github_token="fake-token",
+        await client.get_pr_changed_files(
+            workspace="carsten-j",
+            repo_slug="nonexistent",
+            pr_id=1,
         )
 
 
@@ -97,11 +92,11 @@ async def test_get_pr_diff(monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setattr(httpx.AsyncClient, "get", mock_get)
 
-    diff = await get_pr_diff(
-        owner="carsten-j",
-        repo="pr-review-test-repo",
-        pr_number=42,
-        github_token="fake-token",
+    client = GitHubClient("fake-token")
+    diff = await client.get_pr_diff(
+        workspace="carsten-j",
+        repo_slug="pr-review-test-repo",
+        pr_id=42,
     )
     assert "diff --git" in diff
     assert "+print('hello')" in diff
@@ -117,12 +112,12 @@ async def test_get_file_content(monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setattr(httpx.AsyncClient, "get", mock_get)
 
-    content = await get_file_content(
-        owner="carsten-j",
-        repo="pr-review-test-repo",
+    client = GitHubClient("fake-token")
+    content = await client.get_file_content(
+        workspace="carsten-j",
+        repo_slug="pr-review-test-repo",
         path="src/main.py",
         ref="abc123",
-        github_token="fake-token",
     )
     assert content == "print('hello')\n"
 
@@ -137,11 +132,11 @@ async def test_search_code(monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setattr(httpx.AsyncClient, "get", mock_get)
 
-    results = await search_code(
-        owner="carsten-j",
-        repo="pr-review-test-repo",
+    client = GitHubClient("fake-token")
+    results = await client.search_code(
+        workspace="carsten-j",
+        repo_slug="pr-review-test-repo",
         query="hello",
-        github_token="fake-token",
     )
     assert len(results) == 1
     assert results[0].path == "src/main.py"

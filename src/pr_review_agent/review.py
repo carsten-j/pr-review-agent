@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from pydantic_ai import Agent, RunContext
 
-from pr_review_agent import github_client
+from pr_review_agent.git_platform import GitPlatformClient, RepoDeps
 from pr_review_agent.models import (
     ChangedFile,
     CodeSearchResult,
@@ -22,8 +22,7 @@ REVIEWER_ROLE = os.environ.get("REVIEWER_ROLE", "senior-dev")
 
 
 @dataclass
-class ReviewDeps:
-    github_token: str
+class ReviewDeps(RepoDeps):
     pr: GitHubPullRequest
     repo: GitHubRepo
     changed_files: list[ChangedFile]
@@ -107,18 +106,16 @@ def _register_tools(agent: Agent[ReviewDeps, PRReview]) -> None:
     @agent.tool
     async def fetch_pr_diff(ctx: RunContext[ReviewDeps]) -> str:
         """Fetch the full unified diff of the pull request."""
-        owner, repo_name = ctx.deps.repo.full_name.split("/", 1)
-        return await github_client.get_pr_diff(
-            owner, repo_name, ctx.deps.pr.number, ctx.deps.github_token
+        return await ctx.deps.git_client.get_pr_diff(
+            ctx.deps.workspace, ctx.deps.repo_slug, ctx.deps.pr_id
         )
 
     @agent.tool
     async def fetch_file_content(ctx: RunContext[ReviewDeps], file_path: str) -> str:
         """Fetch the full content of a file at the PR's head ref.
         Use this to see surrounding context beyond what's in the diff."""
-        owner, repo_name = ctx.deps.repo.full_name.split("/", 1)
-        return await github_client.get_file_content(
-            owner, repo_name, file_path, ctx.deps.pr.head.sha, ctx.deps.github_token
+        return await ctx.deps.git_client.get_file_content(
+            ctx.deps.workspace, ctx.deps.repo_slug, file_path, ctx.deps.pr.head.sha
         )
 
     @agent.tool
@@ -128,9 +125,8 @@ def _register_tools(agent: Agent[ReviewDeps, PRReview]) -> None:
         """Search the repository for code matching a query.
         Use this to find where functions are defined, how interfaces are
         implemented, or to check for similar patterns elsewhere."""
-        owner, repo_name = ctx.deps.repo.full_name.split("/", 1)
-        return await github_client.search_code(
-            owner, repo_name, query, ctx.deps.github_token
+        return await ctx.deps.git_client.search_code(
+            ctx.deps.workspace, ctx.deps.repo_slug, query
         )
 
 
@@ -162,13 +158,17 @@ def _format_review_prompt(deps: ReviewDeps) -> str:
 async def run_review(
     pr: GitHubPullRequest,
     repo: GitHubRepo,
-    github_token: str,
+    git_client: GitPlatformClient,
     triage_result: TriageResult,
     changed_files: list[ChangedFile],
 ) -> PRReview:
     """Run the appropriate review agent based on triage tags."""
+    workspace, repo_slug = repo.full_name.split("/", 1)
     deps = ReviewDeps(
-        github_token=github_token,
+        git_client=git_client,
+        workspace=workspace,
+        repo_slug=repo_slug,
+        pr_id=pr.number,
         pr=pr,
         repo=repo,
         changed_files=changed_files,

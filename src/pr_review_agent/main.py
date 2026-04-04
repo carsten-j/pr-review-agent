@@ -28,6 +28,10 @@ class Settings(BaseSettings):
     )
     anthropic_api_key: str = Field(description="Anthropic API key for the triage agent")
     github_token: str = Field(description="GitHub token for fetching PR details")
+    github_api_base: str = Field(
+        default="https://api.github.com",
+        description="Base URL for the GitHub API",
+    )
     reviewer_role: str = Field(
         default="senior-dev",
         description="Reviewer persona for the general review agent",
@@ -83,6 +87,7 @@ async def github_webhook(
             pr=pr,
             repo=payload.repository,
             github_token=settings.github_token,
+            github_api_base=settings.github_api_base,
         )
     )
 
@@ -99,14 +104,16 @@ async def _run_triage_background(
     pr: GitHubPullRequest,
     repo: GitHubRepo,
     github_token: str,
+    github_api_base: str,
 ) -> None:
     """Background task: run triage, then review if needed."""
-    from pr_review_agent.github_client import get_pr_changed_files
+    from pr_review_agent.github_client import GitHubClient
     from pr_review_agent.review import run_review
     from pr_review_agent.triage import run_triage
 
+    git_client = GitHubClient(github_token, base_url=github_api_base)
     try:
-        triage_result = await run_triage(pr=pr, repo=repo, github_token=github_token)
+        triage_result = await run_triage(pr=pr, repo=repo, git_client=git_client)
         logger.info(
             "Triage result for PR #%d: should_review=%s priority=%s "
             "risk_level=%s tags=%s reason=%s",
@@ -123,14 +130,14 @@ async def _run_triage_background(
             return
 
         owner, repo_name = repo.full_name.split("/", 1)
-        changed_files = await get_pr_changed_files(
-            owner, repo_name, pr.number, github_token
+        changed_files = await git_client.get_pr_changed_files(
+            owner, repo_name, pr.number
         )
 
         review = await run_review(
             pr=pr,
             repo=repo,
-            github_token=github_token,
+            git_client=git_client,
             triage_result=triage_result,
             changed_files=changed_files,
         )
@@ -154,3 +161,5 @@ async def _run_triage_background(
             )
     except Exception:
         logger.exception("Pipeline failed for PR #%d", pr.number)
+    finally:
+        await git_client.close()

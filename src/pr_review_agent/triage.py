@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 from pydantic_ai import Agent
 
-from pr_review_agent.github_client import get_pr_changed_files
+from pr_review_agent.git_platform import GitPlatformClient, RepoDeps
 from pr_review_agent.models import (
     ChangedFile,
     GitHubPullRequest,
@@ -17,8 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class TriageDeps:
-    github_token: str
+class TriageDeps(RepoDeps):
     pr: GitHubPullRequest
     repo: GitHubRepo
     changed_files: list[ChangedFile]
@@ -77,19 +76,21 @@ def _format_user_prompt(deps: TriageDeps) -> str:
 async def run_triage(
     pr: GitHubPullRequest,
     repo: GitHubRepo,
-    github_token: str,
+    git_client: GitPlatformClient,
 ) -> TriageResult:
     """Fetch changed files and run the triage agent."""
-    owner, repo_name = repo.full_name.split("/", 1)
-    changed_files = await get_pr_changed_files(
-        owner=owner,
-        repo=repo_name,
-        pr_number=pr.number,
-        github_token=github_token,
+    workspace, repo_slug = repo.full_name.split("/", 1)
+    changed_files = await git_client.get_pr_changed_files(
+        workspace=workspace,
+        repo_slug=repo_slug,
+        pr_id=pr.number,
     )
 
     deps = TriageDeps(
-        github_token=github_token,
+        git_client=git_client,
+        workspace=workspace,
+        repo_slug=repo_slug,
+        pr_id=pr.number,
         pr=pr,
         repo=repo,
         changed_files=changed_files,

@@ -6,6 +6,7 @@ import pytest
 
 from pr_review_agent.models import (
     ChangedFile,
+    CodeSearchResult,
     GitHubBranchRef,
     GitHubPullRequest,
     GitHubRepo,
@@ -15,6 +16,29 @@ from pr_review_agent.models import (
 from pr_review_agent.triage import run_triage
 
 pytestmark = pytest.mark.integration
+
+
+class FakeGitClient:
+    def __init__(self, changed_files: list[ChangedFile]) -> None:
+        self._changed_files = changed_files
+
+    async def get_pr_changed_files(
+        self, workspace: str, repo_slug: str, pr_id: int
+    ) -> list[ChangedFile]:
+        return self._changed_files
+
+    async def get_pr_diff(self, workspace: str, repo_slug: str, pr_id: int) -> str:
+        return ""
+
+    async def get_file_content(
+        self, workspace: str, repo_slug: str, path: str, ref: str
+    ) -> str:
+        return ""
+
+    async def search_code(
+        self, workspace: str, repo_slug: str, query: str
+    ) -> list[CodeSearchResult]:
+        return []
 
 
 @pytest.fixture
@@ -36,7 +60,6 @@ def sample_pr() -> GitHubPullRequest:
 
 async def test_real_triage(
     sample_pr: GitHubPullRequest,
-    monkeypatch: pytest.MonkeyPatch,
 ):
     """Integration test that calls real Anthropic API. Run with: pytest -m integration"""
     if not os.getenv("ANTHROPIC_API_KEY"):
@@ -52,17 +75,14 @@ async def test_real_triage(
         ),
     ]
 
-    async def mock_get_files(owner, repo, pr_number, github_token):
-        return sample_files
-
-    monkeypatch.setattr("pr_review_agent.triage.get_pr_changed_files", mock_get_files)
-
     repo = GitHubRepo(
         full_name="example/repo",
         clone_url="https://github.com/example/repo.git",
         private=False,
     )
-    result = await run_triage(pr=sample_pr, repo=repo, github_token="not-used")
+    result = await run_triage(
+        pr=sample_pr, repo=repo, git_client=FakeGitClient(sample_files)
+    )
 
     assert isinstance(result, TriageResult)
     assert result.should_review is True
