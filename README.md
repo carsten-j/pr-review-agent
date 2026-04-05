@@ -168,14 +168,64 @@ src/pr_review_agent/
 
 ### Pipeline flow
 
-1. GitHub sends a `pull_request` webhook event
-2. The webhook handler validates the signature and filters for `action: opened`
-3. A background task is created via `asyncio.create_task` (webhook returns 200 immediately)
-4. The triage agent fetches changed files and assesses the PR, producing a `TriageResult`
-5. If `should_review` is false, the pipeline stops
-6. The review agent fetches changed files, then selects either the security or general reviewer based on triage tags
-7. The review agent fetches the diff, reads files for context, and searches the codebase as needed — looping until the review is complete
-8. The agent produces a structured `PRReview` with line-specific comments, which is logged
+```mermaid
+flowchart TD
+    GH[GitHub webhook\nPOST /webhook/github]
+    SIG{Valid\nsignature?}
+    ACT{action: opened\n+ pull_request?}
+    RET[Return 200]
+    BG[Background task]
+
+    TRIAGE["Triage agent\nClaude Haiku 4.5\n─────────────────\nfetch changed files\nforce-call produce_triage_result\n→ TriageResult"]
+
+    SR{should_review?}
+    STOP([Stop — PR skipped])
+
+    SEC{security tag?}
+    SECREV[Security reviewer\npersona]
+    GENREV[General reviewer\npersona\nREVIEWER_ROLE]
+
+    FC{≥ 3 changed files?}
+
+    subgraph PARALLEL ["Parallel path  (asyncio.gather, concurrency 4)"]
+        direction LR
+        F1["File 1\nmini-loop\nmax 5 iters"]
+        F2["File 2\nmini-loop\nmax 5 iters"]
+        FN["File N\nmini-loop\nmax 5 iters"]
+    end
+
+    AGG["Aggregation call\nforced submit_review\n→ PRReview"]
+
+    subgraph SINGLE ["Single-loop path  (max 20 iterations)"]
+        direction TB
+        TOOLS["fetch_pr_diff\nfetch_file_content ± line range\nsearch_repo_code"]
+        SUBMIT{submit_review\ncalled?}
+    end
+
+    LOG[Log PRReview]
+
+    GH --> SIG
+    SIG -- No --> RET
+    SIG -- Yes --> ACT
+    ACT -- No --> RET
+    ACT -- Yes --> RET & BG
+
+    BG --> TRIAGE
+    TRIAGE --> SR
+    SR -- No --> STOP
+    SR -- Yes --> SEC
+
+    SEC -- Yes --> SECREV --> FC
+    SEC -- No --> GENREV --> FC
+
+    FC -- Yes --> PARALLEL
+    F1 & F2 & FN --> AGG --> LOG
+
+    FC -- No --> SINGLE
+    TOOLS --> SUBMIT
+    SUBMIT -- No\nfeed tool results back --> TOOLS
+    SUBMIT -- Yes --> LOG
+```
 
 ### How the agents work
 
