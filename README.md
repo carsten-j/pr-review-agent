@@ -145,6 +145,37 @@ uv run pytest -m integration
 
 Requires `ANTHROPIC_API_KEY` to be set in your environment.
 
+### Run evals
+
+Evals measure output *quality* across representative cases using [`pydantic-evals`](https://docs.pydantic.dev/latest/). They run against the real Anthropic API and are excluded from the default test run.
+
+```bash
+# Run via pytest
+uv run pytest -m evals -v
+
+# Or run the standalone script (prints full reports)
+uv run python evals/run_evals.py
+```
+
+Requires `ANTHROPIC_API_KEY`. Two suites are included:
+
+- **`evals/eval_triage.py`** — 5 cases covering SQL injection, hardcoded secrets, README updates, dependency bumps, and feature PRs. Evaluators check priority/risk classification and reason quality.
+- **`evals/eval_review.py`** — 4 cases covering MD5 password hashing, SQL injection, a clean refactor, and missing error handling. Evaluators check that security issues are flagged, clean code is approved, and comments are actionable.
+
+#### Extending evals with real PR diffs
+
+GitHub retains diff data for open, closed, and merged PRs permanently. To add real PR cases:
+
+1. Store `(repo, pr_number)` pairs as `Case` inputs instead of inline diffs
+2. Replace `FakeGitClient` with the real `GitHubClient` in the task function
+3. Set `GITHUB_TOKEN` in your environment (already required for the main app)
+
+```python
+async def triage_task(inputs: TriageInputs) -> TriageResult:
+    client = GitHubClient(token=os.environ["GITHUB_TOKEN"])
+    return await run_triage(pr=inputs.pr, repo=inputs.repo, git_client=client)
+```
+
 ## Architecture
 
 ```text

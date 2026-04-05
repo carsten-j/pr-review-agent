@@ -9,6 +9,7 @@ dependencies = [
     "httpx>=0.28.1",
     "logfire>=3.0",
     "pydantic-ai>=0.2.0",
+    "pydantic-evals>=0.2.0",
     "pydantic-settings>=2.13.1",
     "python-dotenv>=1.2.2",
     "uvicorn>=0.42.0",
@@ -22,10 +23,15 @@ build-backend = "hatchling.build"
 packages = ["src/pr_review_agent"]
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+pythonpath = ["src", "."]
+testpaths = ["tests", "evals"]
+python_files = ["test_*.py", "eval_*.py"]
 asyncio_mode = "auto"
-markers = ["integration: hits real external APIs (deselect with '-m not integration')"]
-addopts = "-m 'not integration'"
+markers = [
+    "integration: hits real external APIs (deselect with '-m not integration')",
+    "evals: runs pydantic-evals suites against real Anthropic API",
+]
+addopts = "-m 'not integration and not evals'"
 
 [dependency-groups]
 dev = [
