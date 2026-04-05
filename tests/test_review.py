@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from typing import cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -14,7 +15,7 @@ from pr_review_agent.models import (
     PRReview,
     TriageResult,
 )
-from pr_review_agent.review import run_review
+from pr_review_agent.review import _slice_file_content, run_review
 
 
 class FakeGitClient:
@@ -225,3 +226,99 @@ async def test_multi_turn_loop(
 
     assert isinstance(result, PRReview)
     assert mock_client.messages.create.call_count == 2
+
+
+# --- _slice_file_content unit tests ---
+
+
+def test_slice_file_content_no_range():
+    content = "line1\nline2\nline3\n"
+    assert _slice_file_content(content, None, None) == content
+
+
+def test_slice_file_content_with_range():
+    content = "\n".join(f"line{i}" for i in range(1, 11)) + "\n"
+    result = _slice_file_content(content, 3, 5)
+    assert result.startswith("# Lines 3-5 of 10\n")
+    assert "line3" in result
+    assert "line5" in result
+    assert "line1" not in result
+    assert "line6" not in result
+
+
+def test_slice_file_content_header_format():
+    content = "a\nb\nc\n"
+    result = _slice_file_content(content, 2, 3)
+    first_line = result.splitlines()[0]
+    assert first_line == "# Lines 2-3 of 3"
+
+
+def test_slice_file_content_tool_schema_has_line_range_params():
+    from pr_review_agent.review import _FETCH_FILE_CONTENT_TOOL
+
+    props = cast(dict, _FETCH_FILE_CONTENT_TOOL["input_schema"]["properties"])  # type: ignore[index]
+    assert "line_start" in props
+    assert "line_end" in props
+
+
+# --- memoization test ---
+
+
+class CountingFakeGitClient(FakeGitClient):
+    def __init__(self):
+        self.get_file_content_call_count = 0
+
+    async def get_file_content(
+        self, workspace: str, repo_slug: str, path: str, ref: str
+    ) -> str:
+        self.get_file_content_call_count += 1
+        return "\n".join(f"line{i}" for i in range(1, 21)) + "\n"
+
+
+def _make_two_identical_file_fetches_then_submit(pr_review: PRReview) -> list:
+    """Simulate Claude calling fetch_file_content twice with identical args."""
+
+    def _file_fetch_block(tool_id: str):
+        b = MagicMock()
+        b.type = "tool_use"
+        b.name = "fetch_file_content"
+        b.id = tool_id
+        b.input = {"file_path": "src/main.py"}
+        return b
+
+    r1 = MagicMock()
+    r1.content = [_file_fetch_block("t1")]
+    r1.stop_reason = "tool_use"
+
+    r2 = MagicMock()
+    r2.content = [_file_fetch_block("t2")]
+    r2.stop_reason = "tool_use"
+
+    return [r1, r2, _make_review_response(pr_review)]
+
+
+async def test_fetch_file_content_cache_hit(
+    sample_pr: GitHubPullRequest,
+    sample_repo: GitHubRepo,
+    sample_changed_files: list[ChangedFile],
+    normal_triage: TriageResult,
+    minimal_review: PRReview,
+):
+    """Repeated fetch_file_content calls with same args hit cache — git client called once."""
+    counting_client = CountingFakeGitClient()
+    mock_client = MagicMock()
+    mock_client.messages.create = AsyncMock(
+        side_effect=_make_two_identical_file_fetches_then_submit(minimal_review)
+    )
+
+    result = await run_review(
+        pr=sample_pr,
+        repo=sample_repo,
+        git_client=counting_client,
+        triage_result=normal_triage,
+        changed_files=sample_changed_files,
+        anthropic_client=mock_client,
+    )
+
+    assert isinstance(result, PRReview)
+    assert counting_client.get_file_content_call_count == 1

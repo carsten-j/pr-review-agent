@@ -22,6 +22,21 @@ from pr_review_agent.models import (
 logger = logging.getLogger(__name__)
 
 
+def _slice_file_content(
+    content: str, line_start: int | None, line_end: int | None
+) -> str:
+    """Return content optionally sliced to [line_start, line_end] (1-indexed, inclusive)."""
+    if line_start is None and line_end is None:
+        return content
+    lines = content.splitlines(keepends=True)
+    total = len(lines)
+    s = (line_start or 1) - 1  # convert to 0-indexed
+    e = line_end or total
+    sliced = "".join(lines[s:e])
+    header = f"# Lines {line_start or 1}-{min(e, total)} of {total}\n"
+    return header + sliced
+
+
 @dataclass
 class ReviewDeps(RepoDeps):
     pr: GitHubPullRequest
@@ -100,8 +115,10 @@ _FETCH_FILE_CONTENT_TOOL: ToolParam = cast(
     {
         "name": "fetch_file_content",
         "description": (
-            "Fetch the full content of a file at the PR's head ref. "
-            "Use this to see surrounding context beyond what's in the diff."
+            "Fetch the content of a file at the PR's head ref. "
+            "Prefer targeted line ranges when reviewing diff hunks to stay within "
+            "context limits — e.g. line_start=10, line_end=60 for a 50-line hunk. "
+            "Omit line_start/line_end only when you need the whole file."
         ),
         "input_schema": {
             "type": "object",
@@ -109,6 +126,14 @@ _FETCH_FILE_CONTENT_TOOL: ToolParam = cast(
                 "file_path": {
                     "type": "string",
                     "description": "Repo-relative file path",
+                },
+                "line_start": {
+                    "type": "integer",
+                    "description": "First line to return (1-indexed, inclusive). Omit for start of file.",
+                },
+                "line_end": {
+                    "type": "integer",
+                    "description": "Last line to return (1-indexed, inclusive). Omit for end of file.",
                 },
             },
             "required": ["file_path"],
@@ -169,7 +194,8 @@ def _format_review_prompt(deps: ReviewDeps) -> str:
         f"Triage reason: {deps.triage.reason}\n\n"
         f"Changed files ({len(deps.changed_files)}):\n{files_summary}\n\n"
         f"Start by fetching the PR diff, then review each changed file. "
-        f"Fetch full file content when you need more context."
+        f"When fetching file content, prefer line ranges (line_start/line_end) "
+        f"targeting the relevant diff hunk to stay within context limits."
     )
 
 
@@ -249,13 +275,22 @@ async def run_review(
     """Run the appropriate review agent based on triage tags."""
     workspace, repo_slug = repo.full_name.split("/", 1)
 
+    _file_cache: dict[tuple[str, int | None, int | None], str] = {}
+
     async def _fetch_pr_diff(_input: dict[str, Any]) -> str:
         return await git_client.get_pr_diff(workspace, repo_slug, pr.number)
 
     async def _fetch_file_content(input_: dict[str, Any]) -> str:
-        return await git_client.get_file_content(
-            workspace, repo_slug, input_["file_path"], pr.head.sha
-        )
+        file_path: str = input_["file_path"]
+        line_start: int | None = input_.get("line_start")
+        line_end: int | None = input_.get("line_end")
+        cache_key = (file_path, line_start, line_end)
+        if cache_key not in _file_cache:
+            raw = await git_client.get_file_content(
+                workspace, repo_slug, file_path, pr.head.sha
+            )
+            _file_cache[cache_key] = _slice_file_content(raw, line_start, line_end)
+        return _file_cache[cache_key]
 
     async def _search_repo_code(input_: dict[str, Any]) -> str:
         results: list[CodeSearchResult] = await git_client.search_code(
