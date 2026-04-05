@@ -94,7 +94,7 @@ Navigate to your test repo (e.g., `carsten-j/pr-review-test-repo`):
 ### 2. Configure the webhook
 
 | Setting | Value |
-|---------|-------|
+| ------- | ----- |
 | **Payload URL** | `https://<your-ngrok-url>/webhook/github` |
 | **Content type** | `application/json` |
 | **Secret** | The same value you set in `.env` as `GITHUB_WEBHOOK_SECRET` |
@@ -147,7 +147,7 @@ Requires `ANTHROPIC_API_KEY` to be set in your environment.
 
 ## Architecture
 
-```
+```text
 src/pr_review_agent/
 ├── main.py            # FastAPI app — webhook endpoint, settings, Logfire setup, background pipeline
 ├── models.py          # Pydantic models for GitHub payloads, triage, and review output
@@ -280,6 +280,7 @@ The review agent produces a `PRReview` with:
 The agent is instrumented with [Logfire](https://logfire.pydantic.dev/) via `logfire.instrument_anthropic()`. When `LOGFIRE_TOKEN` is set, every PR pipeline run appears as a single trace in the Logfire UI — each `messages.create()` call appears as a span with model, token usage, and latency, all nested under a `review PR {repo}#{pr_number}` root span.
 
 To enable:
+
 1. Create a write token at logfire.pydantic.dev → project `pr-review-agent` → Settings → Write tokens
 2. Add `LOGFIRE_TOKEN=<your-token>` to `.env`
 3. Start the server — traces appear in Logfire automatically
