@@ -114,7 +114,7 @@ async def _run_triage_background(
 ) -> None:
     """Background task: run triage, then review if needed."""
     from pr_review_agent.github_client import GitHubClient
-    from pr_review_agent.review import run_review
+    from pr_review_agent.review import post_review_comments, run_review
     from pr_review_agent.triage import run_triage
 
     git_client = GitHubClient(github_token, base_url=github_api_base)
@@ -173,6 +173,14 @@ async def _run_triage_background(
                     comment.line_start,
                     comment.comment,
                 )
+            await post_review_comments(
+                git_client=git_client,
+                workspace=owner,
+                repo_slug=repo_name,
+                pr_id=pr.number,
+                review=review,
+            )
+            logger.info("Posted review to PR #%d", pr.number)
     except Exception:
         logger.exception("Pipeline failed for PR #%d", pr.number)
     finally:

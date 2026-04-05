@@ -11,16 +11,21 @@ from pr_review_agent.models import (
     GitHubRepo,
     GitHubUser,
     PRReview,
+    ReviewComment,
     TriageResult,
 )
 from pr_review_agent.review import (
     general_review_agent,
+    post_review_comments,
     run_review,
     security_review_agent,
 )
 
 
 class FakeGitClient:
+    def __init__(self) -> None:
+        self.posted_reviews: list[dict] = []
+
     async def get_pr_diff(self, workspace: str, repo_slug: str, pr_id: int) -> str:
         return "diff --git a/src/main.py b/src/main.py\n+print('hello')"
 
@@ -38,6 +43,26 @@ class FakeGitClient:
         self, workspace: str, repo_slug: str, pr_id: int
     ) -> list[ChangedFile]:
         return []
+
+    async def post_review(
+        self,
+        workspace: str,
+        repo_slug: str,
+        pr_id: int,
+        body: str,
+        event: str,
+        comments: list[dict],
+    ) -> None:
+        self.posted_reviews.append(
+            {
+                "workspace": workspace,
+                "repo_slug": repo_slug,
+                "pr_id": pr_id,
+                "body": body,
+                "event": event,
+                "comments": comments,
+            }
+        )
 
 
 @pytest.fixture
@@ -141,3 +166,82 @@ async def test_security_review_routes_correctly(
         )
 
     assert isinstance(result, PRReview)
+
+
+async def test_post_review_comments_approve():
+    """post_review_comments maps an approving PRReview to APPROVE event with correct comment shape."""
+    review = PRReview(
+        summary="Looks good",
+        risk_level="low",
+        approve=True,
+        comments=[
+            ReviewComment(
+                file_path="src/main.py",
+                line_start=10,
+                severity="warning",
+                category="naming",
+                comment="Use snake_case here",
+                suggestion="my_variable = 1",
+            )
+        ],
+    )
+    client = FakeGitClient()
+    await post_review_comments(client, "owner", "repo", 42, review)
+
+    assert len(client.posted_reviews) == 1
+    call = client.posted_reviews[0]
+    assert call["workspace"] == "owner"
+    assert call["repo_slug"] == "repo"
+    assert call["pr_id"] == 42
+    assert call["body"] == "Looks good"
+    assert call["event"] == "APPROVE"
+    assert len(call["comments"]) == 1
+    c = call["comments"][0]
+    assert c["path"] == "src/main.py"
+    assert c["line"] == 10
+    assert "[warning]" in c["body"]
+    assert "naming" in c["body"]
+    assert "Use snake_case here" in c["body"]
+    assert "my_variable = 1" in c["body"]
+
+
+async def test_post_review_comments_request_changes():
+    """post_review_comments maps a non-approving PRReview to REQUEST_CHANGES event."""
+    review = PRReview(
+        summary="Needs work",
+        risk_level="high",
+        approve=False,
+        comments=[
+            ReviewComment(
+                file_path="src/auth.py",
+                line_start=5,
+                severity="critical",
+                category="security",
+                comment="SQL injection risk",
+                suggestion=None,
+            )
+        ],
+    )
+    client = FakeGitClient()
+    await post_review_comments(client, "owner", "repo", 7, review)
+
+    call = client.posted_reviews[0]
+    assert call["event"] == "REQUEST_CHANGES"
+    c = call["comments"][0]
+    assert "Suggestion" not in c["body"]
+
+
+async def test_post_review_comments_no_comments():
+    """post_review_comments works when there are no inline comments."""
+    review = PRReview(
+        summary="No issues found",
+        risk_level="low",
+        approve=True,
+        comments=[],
+    )
+    client = FakeGitClient()
+    await post_review_comments(client, "owner", "repo", 1, review)
+
+    call = client.posted_reviews[0]
+    assert call["comments"] == []
+    assert call["event"] == "APPROVE"

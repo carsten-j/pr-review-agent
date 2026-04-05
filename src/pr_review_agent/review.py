@@ -154,6 +154,31 @@ def _format_review_prompt(deps: ReviewDeps) -> str:
     )
 
 
+async def post_review_comments(
+    git_client: GitPlatformClient,
+    workspace: str,
+    repo_slug: str,
+    pr_id: int,
+    review: PRReview,
+) -> None:
+    """Post a PRReview as a GitHub pull request review with inline comments."""
+    event = "APPROVE" if review.approve else "REQUEST_CHANGES"
+    comments = [
+        {
+            "path": c.file_path,
+            "line": c.line_start,
+            "body": f"**[{c.severity}] {c.category}**\n\n{c.comment}"
+            + (
+                f"\n\n**Suggestion:**\n```\n{c.suggestion}\n```" if c.suggestion else ""
+            ),
+        }
+        for c in review.comments
+    ]
+    await git_client.post_review(
+        workspace, repo_slug, pr_id, review.summary, event, comments
+    )
+
+
 async def run_review(
     pr: GitHubPullRequest,
     repo: GitHubRepo,

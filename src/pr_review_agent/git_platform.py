@@ -23,6 +23,16 @@ class GitPlatformClient(Protocol):
         self, workspace: str, repo_slug: str, query: str
     ) -> list[CodeSearchResult]: ...
 
+    async def post_review(
+        self,
+        workspace: str,
+        repo_slug: str,
+        pr_id: int,
+        body: str,
+        event: str,
+        comments: list[dict],
+    ) -> None: ...
+
 
 @dataclass
 class RepoDeps:

@@ -40,6 +40,17 @@ class FakeGitClient:
     ) -> list[CodeSearchResult]:
         return []
 
+    async def post_review(
+        self,
+        workspace: str,
+        repo_slug: str,
+        pr_id: int,
+        body: str,
+        event: str,
+        comments: list[dict],
+    ) -> None:
+        pass
+
 
 @pytest.fixture
 def sample_pr() -> GitHubPullRequest:

@@ -56,6 +56,21 @@ class GitHubClient:
         response.raise_for_status()
         return response.text
 
+    async def post_review(
+        self,
+        workspace: str,
+        repo_slug: str,
+        pr_id: int,
+        body: str,
+        event: str,
+        comments: list[dict],
+    ) -> None:
+        url = f"{self._base_url}/repos/{workspace}/{repo_slug}/pulls/{pr_id}/reviews"
+        response = await self._http.post(
+            url, json={"body": body, "event": event, "comments": comments}
+        )
+        response.raise_for_status()
+
     async def search_code(
         self, workspace: str, repo_slug: str, query: str
     ) -> list[CodeSearchResult]:

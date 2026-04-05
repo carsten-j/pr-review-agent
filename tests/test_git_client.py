@@ -141,3 +141,62 @@ async def test_search_code(monkeypatch: pytest.MonkeyPatch):
     assert len(results) == 1
     assert results[0].path == "src/main.py"
     assert "def hello():" in results[0].matched_lines
+
+
+async def test_post_review(monkeypatch: pytest.MonkeyPatch):
+    posted: dict = {}
+
+    async def mock_post(self, url, **kwargs):
+        posted["url"] = url
+        posted["json"] = kwargs.get("json")
+        return httpx.Response(
+            status_code=200,
+            json={"id": 1},
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", mock_post)
+
+    client = GitHubClient("fake-token")
+    await client.post_review(
+        workspace="carsten-j",
+        repo_slug="pr-review-test-repo",
+        pr_id=42,
+        body="LGTM overall",
+        event="APPROVE",
+        comments=[
+            {
+                "path": "src/main.py",
+                "line": 5,
+                "body": "**[warning] naming**\n\nRename this",
+            }
+        ],
+    )
+
+    assert "repos/carsten-j/pr-review-test-repo/pulls/42/reviews" in posted["url"]
+    assert posted["json"]["body"] == "LGTM overall"
+    assert posted["json"]["event"] == "APPROVE"
+    assert len(posted["json"]["comments"]) == 1
+    assert posted["json"]["comments"][0]["path"] == "src/main.py"
+
+
+async def test_post_review_raises_on_error(monkeypatch: pytest.MonkeyPatch):
+    async def mock_post(self, url, **kwargs):
+        return httpx.Response(
+            status_code=422,
+            json={"message": "Unprocessable Entity"},
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", mock_post)
+
+    client = GitHubClient("fake-token")
+    with pytest.raises(httpx.HTTPStatusError):
+        await client.post_review(
+            workspace="carsten-j",
+            repo_slug="pr-review-test-repo",
+            pr_id=42,
+            body="summary",
+            event="REQUEST_CHANGES",
+            comments=[],
+        )
