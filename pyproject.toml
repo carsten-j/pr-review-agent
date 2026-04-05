@@ -1,14 +1,14 @@
 [project]
 name = "pr-review-agent"
 version = "0.1.0"
-description = "GitHub PR review agent powered by Pydantic AI and Anthropic"
+description = "GitHub PR review agent powered by the Anthropic SDK"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.135.3",
     "httpx>=0.28.1",
     "logfire>=3.0",
-    "pydantic-ai>=0.2.0",
+    "anthropic>=0.50.0",
     "pydantic-settings>=2.13.1",
     "python-dotenv>=1.2.2",
     "uvicorn>=0.42.0",

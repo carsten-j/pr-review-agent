@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
-from pydantic_ai.models.test import TestModel
 
 from pr_review_agent.models import (
     ChangedFile,
@@ -12,7 +13,7 @@ from pr_review_agent.models import (
     GitHubUser,
     TriageResult,
 )
-from pr_review_agent.triage import run_triage, triage_agent
+from pr_review_agent.triage import run_triage
 
 
 class FakeGitClient:
@@ -77,18 +78,44 @@ def sample_changed_files() -> list[ChangedFile]:
     ]
 
 
+def _make_triage_response(triage_result: TriageResult):
+    """Build a minimal mock anthropic response for a forced tool_use triage call."""
+    tool_use_block = MagicMock()
+    tool_use_block.type = "tool_use"
+    tool_use_block.name = "produce_triage_result"
+    tool_use_block.input = triage_result.model_dump()
+
+    response = MagicMock()
+    response.content = [tool_use_block]
+    response.stop_reason = "tool_use"
+    return response
+
+
 async def test_triage_returns_structured_output(
     sample_pr: GitHubPullRequest,
     sample_repo: GitHubRepo,
     sample_changed_files: list[ChangedFile],
 ):
-    """Test that the triage agent produces a valid TriageResult using TestModel."""
-    with triage_agent.override(model=TestModel()):
-        result = await run_triage(
-            pr=sample_pr,
-            repo=sample_repo,
-            git_client=FakeGitClient(sample_changed_files),
-        )
+    """Test that run_triage produces a valid TriageResult via mocked Anthropic client."""
+    expected = TriageResult(
+        should_review=True,
+        priority="normal",
+        risk_level="medium",
+        reason="Feature addition with moderate complexity",
+        tags=["feature"],
+    )
+
+    mock_client = MagicMock()
+    mock_client.messages.create = AsyncMock(
+        return_value=_make_triage_response(expected)
+    )
+
+    result = await run_triage(
+        pr=sample_pr,
+        repo=sample_repo,
+        git_client=FakeGitClient(sample_changed_files),
+        anthropic_client=mock_client,
+    )
 
     assert isinstance(result, TriageResult)
     assert result.priority in ("normal", "urgent")
@@ -96,3 +123,12 @@ async def test_triage_returns_structured_output(
     assert isinstance(result.should_review, bool)
     assert isinstance(result.tags, list)
     assert isinstance(result.reason, str)
+
+    mock_client.messages.create.assert_called_once()
+    call_kwargs = mock_client.messages.create.call_args.kwargs
+    assert call_kwargs["model"] == "claude-haiku-4-5"
+    assert call_kwargs["tool_choice"] == {
+        "type": "tool",
+        "name": "produce_triage_result",
+    }
+    assert len(call_kwargs["tools"]) == 1

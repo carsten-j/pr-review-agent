@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from typing import cast
 
-from pydantic_ai import Agent
+from anthropic import AsyncAnthropic
+from anthropic.types import MessageParam, ToolParam, ToolUseBlock
 
 from pr_review_agent.git_platform import GitPlatformClient, RepoDeps
 from pr_review_agent.models import (
@@ -49,11 +51,13 @@ or database migrations. Otherwise "normal".
 dependencies, security, infrastructure, breaking-change, database, api, config, ci.\
 """
 
-triage_agent = Agent(
-    "anthropic:claude-haiku-4-5",
-    deps_type=TriageDeps,
-    output_type=TriageResult,
-    system_prompt=TRIAGE_SYSTEM_PROMPT,
+_TRIAGE_OUTPUT_TOOL: ToolParam = cast(
+    "ToolParam",
+    {
+        "name": "produce_triage_result",
+        "description": "Produce the structured triage assessment for the pull request.",
+        "input_schema": TriageResult.model_json_schema(),
+    },
 )
 
 
@@ -77,6 +81,7 @@ async def run_triage(
     pr: GitHubPullRequest,
     repo: GitHubRepo,
     git_client: GitPlatformClient,
+    anthropic_client: AsyncAnthropic,
 ) -> TriageResult:
     """Fetch changed files and run the triage agent."""
     workspace, repo_slug = repo.full_name.split("/", 1)
@@ -96,8 +101,26 @@ async def run_triage(
         changed_files=changed_files,
     )
 
-    result = await triage_agent.run(
-        _format_user_prompt(deps),
-        deps=deps,
+    response = await anthropic_client.messages.create(
+        model="claude-haiku-4-5",
+        max_tokens=1024,
+        system=[
+            {
+                "type": "text",
+                "text": TRIAGE_SYSTEM_PROMPT,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ],
+        tools=[_TRIAGE_OUTPUT_TOOL],
+        tool_choice={"type": "tool", "name": "produce_triage_result"},
+        messages=cast(
+            "list[MessageParam]",
+            [{"role": "user", "content": _format_user_prompt(deps)}],
+        ),
     )
-    return result.output  # ty: ignore[invalid-return-type]  # Pydantic AI generic
+
+    tool_use_block = cast(
+        ToolUseBlock,
+        next(b for b in response.content if b.type == "tool_use"),
+    )
+    return TriageResult.model_validate(tool_use_block.input)

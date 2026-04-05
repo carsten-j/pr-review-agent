@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 
 import pytest
+from anthropic import AsyncAnthropic
 
 from pr_review_agent.models import (
     ChangedFile,
@@ -171,6 +172,7 @@ async def test_security_review_with_real_model(
         git_client=FakeGitClient(),
         triage_result=security_triage,
         changed_files=changed_files,
+        anthropic_client=AsyncAnthropic(),
     )
 
     assert isinstance(review, PRReview)
@@ -206,6 +208,7 @@ async def test_general_review_with_real_model(
         git_client=FakeGitClient(),
         triage_result=general_triage,
         changed_files=changed_files,
+        anthropic_client=AsyncAnthropic(),
     )
 
     assert isinstance(review, PRReview)

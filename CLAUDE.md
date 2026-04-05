@@ -30,30 +30,34 @@ uv run ty check src/ tests/ scripts/
 
 ## Architecture
 
-FastAPI webhook receiver → triage agent → review agent pipeline, all using Pydantic AI.
+FastAPI webhook receiver → triage agent → review agent pipeline, using the raw Anthropic Python SDK (`anthropic`).
 
 **Pipeline flow:** GitHub webhook (`POST /webhook/github`) → signature verification → background task → triage (Haiku 4.5) → if `should_review` → code review (Sonnet 4.5) → log results.
 
-**Two review agents** in `review.py`: `security_review_agent` runs when triage tags include "security", otherwise `general_review_agent` runs. Both share the same tool list (`fetch_pr_diff`, `fetch_file_content`, `search_repo_code`) passed via `tools=[...]` in the `Agent` constructor. The general agent's persona is injected at request time via `@general_review_agent.instructions` reading `ctx.deps.reviewer_role`.
+**Triage (single-turn):** `triage.py` makes one `messages.create()` call with `tool_choice={"type": "tool", "name": "produce_triage_result"}` to force a structured `TriageResult` response. No loop needed.
 
-**Dependency injection pattern:** Each agent defines a `*Deps` dataclass (`TriageDeps`, `ReviewDeps`) passed through `RunContext`. Both extend `RepoDeps` (from `git_platform.py`) which carries `git_client`, `workspace`, `repo_slug`, and `pr_id`. Tools access all fields directly from `ctx.deps`.
+**Review (agentic loop):** `review.py` runs `_run_review_loop()` which loops until Claude calls `submit_review`. Tools (`fetch_pr_diff`, `fetch_file_content`, `search_repo_code`) are closures over the call-scoped context (PR, repo, SHA). A security reviewer runs when triage tags include "security", otherwise a general reviewer runs (persona set via `REVIEWER_ROLE` setting). Guards: `max_iterations=20`, explicit checks for `end_turn` and `max_tokens` stop reasons.
+
+**Client injection:** `AsyncAnthropic()` is created once in `_run_triage_background` in `main.py` and passed to both `run_triage()` and `run_review()`. Tests inject a `MagicMock` instead.
 
 **Git platform abstraction:** `git_platform.py` defines the `GitPlatformClient` Protocol and `RepoDeps` dataclass. `github_client.py` provides the `GitHubClient` implementation (owns a shared `httpx.AsyncClient`, configurable `base_url` for GitHub Enterprise).
 
 **Settings:** `pydantic-settings` `BaseSettings` in `main.py`, populated from env vars (`.env` loaded via `python-dotenv`). Key settings: `github_token`, `github_api_base`, `reviewer_role`.
 
-**Observability:** Logfire is configured at module level in `main.py` via `logfire.configure()` + `logfire.instrument_pydantic_ai()`. Reads `LOGFIRE_TOKEN` from env automatically — no-op if unset. Each PR pipeline run is wrapped in a `logfire.span("review PR {repo}#{pr_number}", ...)` for searchable audit traces. No changes needed in agent files.
+**Observability:** Logfire is configured at module level in `main.py` via `logfire.configure()` + `logfire.instrument_anthropic()`. Reads `LOGFIRE_TOKEN` from env automatically — no-op if unset. Each PR pipeline run is wrapped in a `logfire.span("review PR {repo}#{pr_number}", ...)` for searchable audit traces.
 
 **Webhook security:** `security.py` provides HMAC-SHA256 verification as a FastAPI dependency. The `verify_webhook_signature` dependency imports `get_settings` from `main.py` at call time to avoid circular imports.
 
 ## Testing patterns
 
 - `GitHubClient` tests mock `httpx.AsyncClient.get` directly (the client holds a shared instance)
-- Agent tests use `agent.override(model=TestModel())` context manager — never set `agent.model` directly
-- Review and triage tests use a `FakeGitClient` class passed as `git_client=` — no monkeypatching needed
+- Triage and review tests use `MagicMock` + `AsyncMock` for the Anthropic client — `mock_client.messages.create = AsyncMock(return_value=...)`
+- Use `FakeGitClient` passed as `git_client=` — no monkeypatching needed
 - Integration tests are marked `@pytest.mark.integration` and excluded by default (`addopts = "-m 'not integration'"` in pyproject.toml)
 - All tests are async (`asyncio_mode = "auto"`)
 
-## Key type suppressions
+## Key type patterns
 
-`# ty: ignore[invalid-return-type]` appears on `result.output` returns from agent runs — this is a known Pydantic AI generic typing limitation.
+- Tool dicts require `cast("ToolParam", {...})` to satisfy `ty` — the dicts are correct at runtime but need the cast for static typing
+- `cast(ToolUseBlock, block)` is used after a `block.type != "tool_use"` guard for type narrowing — avoids `isinstance` which would break `MagicMock`-based tests
+- `cast("list[MessageParam]", messages)` at `messages.create()` call sites for the same reason

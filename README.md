@@ -1,6 +1,6 @@
 # PR Review Agent
 
-A GitHub PR review agent powered by Pydantic AI and Anthropic. A FastAPI webhook receiver that detects new pull requests on GitHub, triages them using Claude Haiku 4.5, and runs an automated code review using Claude Sonnet 4.5.
+A GitHub PR review agent powered by the [Anthropic Python SDK](https://github.com/anthropics/anthropic-sdk-python) and FastAPI. A webhook receiver that detects new pull requests on GitHub, triages them using Claude Haiku 4.5, and runs an automated code review using Claude Sonnet 4.5.
 
 ## Prerequisites
 
@@ -154,17 +154,17 @@ src/pr_review_agent/
 ├── security.py        # HMAC-SHA256 signature verification
 ├── git_platform.py    # GitPlatformClient protocol and RepoDeps dataclass
 ├── github_client.py   # GitHubClient — implements GitPlatformClient via httpx
-├── triage.py          # Pydantic AI triage agent (Claude Haiku 4.5)
+├── triage.py          # Triage agent using Anthropic SDK (Claude Haiku 4.5)
 └── review.py          # Code review agents — security + general (Claude Sonnet 4.5)
 ```
 
-- **`main.py`** — Receives `POST /webhook/github`, verifies the signature, filters for `pull_request` events with `action: opened`, logs the PR details, and fires off a background pipeline (triage → review). Configures Logfire at startup via `logfire.configure()` and `logfire.instrument_pydantic_ai()`.
+- **`main.py`** — Receives `POST /webhook/github`, verifies the signature, filters for `pull_request` events with `action: opened`, logs the PR details, and fires off a background pipeline (triage → review). Configures Logfire at startup via `logfire.configure()` and `logfire.instrument_anthropic()`.
 - **`models.py`** — Typed Pydantic models for GitHub webhook payloads, changed files, `TriageResult`, and `PRReview` output schemas.
 - **`security.py`** — Verifies the `X-Hub-Signature-256` header using the shared secret. Implemented as a FastAPI dependency.
 - **`git_platform.py`** — Defines the `GitPlatformClient` Protocol (abstract interface) and the `RepoDeps` dataclass that bundles `git_client`, `workspace`, `repo_slug`, and `pr_id`. Designed to support Bitbucket or other platforms in the future.
 - **`github_client.py`** — `GitHubClient` implementation of `GitPlatformClient`. Owns a shared `httpx.AsyncClient` for connection pooling. Supports a configurable `base_url` for GitHub Enterprise Server.
-- **`triage.py`** — Pydantic AI agent using Claude Haiku 4.5. Takes PR metadata and changed file list, produces a structured `TriageResult` with should_review, priority, risk_level, reason, and tags. Uses `TriageDeps(RepoDeps)`.
-- **`review.py`** — Two Pydantic AI review agents using Claude Sonnet 4.5. A security reviewer runs when triage tags include "security", otherwise a general reviewer runs (persona configured via `REVIEWER_ROLE` setting). Both share the same tools (`fetch_pr_diff`, `fetch_file_content`, `search_repo_code`) and produce a structured `PRReview`. Uses `ReviewDeps(RepoDeps)`.
+- **`triage.py`** — Single-turn agent using Claude Haiku 4.5. Takes PR metadata and changed file list, produces a structured `TriageResult` by forcing a tool call with `tool_choice`. No agentic loop needed — one request, one structured response.
+- **`review.py`** — Agentic loop using Claude Sonnet 4.5. A security reviewer runs when triage tags include "security", otherwise a general reviewer runs (persona configured via `REVIEWER_ROLE` setting). Both use the same tools (`fetch_pr_diff`, `fetch_file_content`, `search_repo_code`) as closures, and loop until Claude calls `submit_review` with a structured `PRReview`.
 
 ### Pipeline flow
 
@@ -173,9 +173,29 @@ src/pr_review_agent/
 3. A background task is created via `asyncio.create_task` (webhook returns 200 immediately)
 4. The triage agent fetches changed files and assesses the PR, producing a `TriageResult`
 5. If `should_review` is false, the pipeline stops
-6. The review agent fetches changed files again, then based on triage tags either the security or general reviewer runs
-7. The review agent fetches the diff, reads files for context, and searches the codebase as needed
+6. The review agent fetches changed files, then selects either the security or general reviewer based on triage tags
+7. The review agent fetches the diff, reads files for context, and searches the codebase as needed — looping until the review is complete
 8. The agent produces a structured `PRReview` with line-specific comments, which is logged
+
+### How the agents work
+
+**Triage (single-turn):** One `messages.create()` call with `tool_choice={"type": "tool", "name": "produce_triage_result"}` forces Claude to return a structured `TriageResult` directly — no loop needed.
+
+**Review (agentic loop):** Claude is given tools and loops until it calls `submit_review`. Each turn, tool results are fed back as user messages. The loop has a `max_iterations=20` guard and explicit checks for `end_turn` (agent stopped without submitting) and `max_tokens` (response truncated).
+
+Tools are defined as closures inside `run_review()`, capturing the request-scoped context (PR number, repo, SHA) without any dependency injection framework:
+
+```python
+async def run_review(pr, repo, git_client, ...):
+    async def _fetch_pr_diff(_input):
+        return await git_client.get_pr_diff(workspace, repo_slug, pr.number)
+
+    async def _fetch_file_content(input_):
+        return await git_client.get_file_content(
+            workspace, repo_slug, input_["file_path"], pr.head.sha
+        )
+    ...
+```
 
 ### Triage output
 
@@ -200,7 +220,7 @@ The review agent produces a `PRReview` with:
 
 ## Observability
 
-The agent is instrumented with [Logfire](https://logfire.pydantic.dev/). When `LOGFIRE_TOKEN` is set, every PR pipeline run appears as a single trace in the Logfire UI — triage agent run, tool calls, model requests, token usage, and the final review, all nested under a `review PR {repo}#{pr_number}` root span.
+The agent is instrumented with [Logfire](https://logfire.pydantic.dev/) via `logfire.instrument_anthropic()`. When `LOGFIRE_TOKEN` is set, every PR pipeline run appears as a single trace in the Logfire UI — each `messages.create()` call appears as a span with model, token usage, and latency, all nested under a `review PR {repo}#{pr_number}` root span.
 
 To enable:
 1. Create a write token at logfire.pydantic.dev → project `pr-review-agent` → Settings → Write tokens

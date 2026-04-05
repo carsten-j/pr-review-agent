@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 
 import pytest
+from anthropic import AsyncAnthropic
 
 from pr_review_agent.models import (
     ChangedFile,
@@ -81,7 +82,10 @@ async def test_real_triage(
         private=False,
     )
     result = await run_triage(
-        pr=sample_pr, repo=repo, git_client=FakeGitClient(sample_files)
+        pr=sample_pr,
+        repo=repo,
+        git_client=FakeGitClient(sample_files),
+        anthropic_client=AsyncAnthropic(),
     )
 
     assert isinstance(result, TriageResult)

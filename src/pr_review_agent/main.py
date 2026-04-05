@@ -6,6 +6,7 @@ from functools import lru_cache
 from typing import Annotated
 
 import logfire
+from anthropic import AsyncAnthropic
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, Request
 from pydantic import Field
@@ -17,7 +18,7 @@ from pr_review_agent.security import verify_webhook_signature
 load_dotenv()
 
 logfire.configure()
-logfire.instrument_pydantic_ai()
+logfire.instrument_anthropic()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -118,6 +119,7 @@ async def _run_triage_background(
     from pr_review_agent.triage import run_triage
 
     git_client = GitHubClient(github_token, base_url=github_api_base)
+    anthropic_client = AsyncAnthropic()
     try:
         with logfire.span(
             "review PR {repo}#{pr_number}",
@@ -126,7 +128,12 @@ async def _run_triage_background(
             pr_title=pr.title,
             pr_author=pr.user.login,
         ):
-            triage_result = await run_triage(pr=pr, repo=repo, git_client=git_client)
+            triage_result = await run_triage(
+                pr=pr,
+                repo=repo,
+                git_client=git_client,
+                anthropic_client=anthropic_client,
+            )
             logger.info(
                 "Triage result for PR #%d: should_review=%s priority=%s "
                 "risk_level=%s tags=%s reason=%s",
@@ -154,6 +161,7 @@ async def _run_triage_background(
                 triage_result=triage_result,
                 changed_files=changed_files,
                 reviewer_role=reviewer_role,
+                anthropic_client=anthropic_client,
             )
             logger.info(
                 "Review for PR #%d: risk=%s approve=%s comments=%d "

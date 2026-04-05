@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
+from typing import Any, cast
 
-from pydantic_ai import Agent, RunContext
+import logfire
+from anthropic import AsyncAnthropic
+from anthropic.types import MessageParam, ToolParam, ToolUseBlock
 
 from pr_review_agent.git_platform import GitPlatformClient, RepoDeps
 from pr_review_agent.models import (
@@ -82,55 +86,70 @@ Use the available tools to fetch the PR diff, read file contents for context, \
 and search the codebase for related patterns.\
 """
 
-
-async def fetch_pr_diff(ctx: RunContext[ReviewDeps]) -> str:
-    """Fetch the full unified diff of the pull request."""
-    return await ctx.deps.git_client.get_pr_diff(
-        ctx.deps.workspace, ctx.deps.repo_slug, ctx.deps.pr_id
-    )
-
-
-async def fetch_file_content(ctx: RunContext[ReviewDeps], file_path: str) -> str:
-    """Fetch the full content of a file at the PR's head ref.
-    Use this to see surrounding context beyond what's in the diff."""
-    return await ctx.deps.git_client.get_file_content(
-        ctx.deps.workspace, ctx.deps.repo_slug, file_path, ctx.deps.pr.head.sha
-    )
-
-
-async def search_repo_code(
-    ctx: RunContext[ReviewDeps], query: str
-) -> list[CodeSearchResult]:
-    """Search the repository for code matching a query.
-    Use this to find where functions are defined, how interfaces are
-    implemented, or to check for similar patterns elsewhere."""
-    return await ctx.deps.git_client.search_code(
-        ctx.deps.workspace, ctx.deps.repo_slug, query
-    )
-
-
-_REVIEW_TOOLS = [fetch_pr_diff, fetch_file_content, search_repo_code]
-
-security_review_agent = Agent(
-    "anthropic:claude-sonnet-4-5",
-    deps_type=ReviewDeps,
-    output_type=PRReview,
-    system_prompt=SECURITY_REVIEW_SYSTEM_PROMPT,
-    tools=_REVIEW_TOOLS,
+_FETCH_PR_DIFF_TOOL: ToolParam = cast(
+    "ToolParam",
+    {
+        "name": "fetch_pr_diff",
+        "description": "Fetch the full unified diff of the pull request.",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
 )
 
-general_review_agent = Agent(
-    "anthropic:claude-sonnet-4-5",
-    deps_type=ReviewDeps,
-    output_type=PRReview,
-    system_prompt=GENERAL_REVIEW_SYSTEM_PROMPT,
-    tools=_REVIEW_TOOLS,
+_FETCH_FILE_CONTENT_TOOL: ToolParam = cast(
+    "ToolParam",
+    {
+        "name": "fetch_file_content",
+        "description": (
+            "Fetch the full content of a file at the PR's head ref. "
+            "Use this to see surrounding context beyond what's in the diff."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "file_path": {
+                    "type": "string",
+                    "description": "Repo-relative file path",
+                },
+            },
+            "required": ["file_path"],
+        },
+    },
 )
 
+_SEARCH_REPO_CODE_TOOL: ToolParam = cast(
+    "ToolParam",
+    {
+        "name": "search_repo_code",
+        "description": (
+            "Search the repository for code matching a query. "
+            "Use this to find where functions are defined, how interfaces are "
+            "implemented, or to check for similar patterns elsewhere."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query string"},
+            },
+            "required": ["query"],
+        },
+    },
+)
 
-@general_review_agent.instructions
-def reviewer_persona(ctx: RunContext[ReviewDeps]) -> str:
-    return f"You are a {ctx.deps.reviewer_role} reviewing a pull request."
+_SUBMIT_REVIEW_TOOL: ToolParam = cast(
+    "ToolParam",
+    {
+        "name": "submit_review",
+        "description": "Submit the completed structured pull request review.",
+        "input_schema": PRReview.model_json_schema(),
+    },
+)
+
+_ALL_REVIEW_TOOLS: list[ToolParam] = [
+    _FETCH_PR_DIFF_TOOL,
+    _FETCH_FILE_CONTENT_TOOL,
+    _SEARCH_REPO_CODE_TOOL,
+    _SUBMIT_REVIEW_TOOL,
+]
 
 
 def _format_review_prompt(deps: ReviewDeps) -> str:
@@ -154,16 +173,114 @@ def _format_review_prompt(deps: ReviewDeps) -> str:
     )
 
 
+async def _run_review_loop(
+    system: str,
+    user_prompt: str,
+    tool_executors: dict[str, Any],
+    anthropic_client: AsyncAnthropic,
+    max_iterations: int = 20,
+) -> PRReview:
+    """Drive the tool-use agentic loop until submit_review is called."""
+    messages: list[Any] = [{"role": "user", "content": user_prompt}]
+
+    for iteration in range(max_iterations):
+        response = await anthropic_client.messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=16000,
+            system=[
+                {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
+            ],
+            tools=_ALL_REVIEW_TOOLS,
+            messages=cast("list[MessageParam]", messages),
+        )
+
+        messages.append({"role": "assistant", "content": response.content})
+
+        if response.stop_reason == "max_tokens":
+            raise RuntimeError(
+                f"Review response was truncated at iteration {iteration} "
+                "— increase max_tokens"
+            )
+        if response.stop_reason == "end_turn":
+            raise RuntimeError(
+                f"Review agent stopped without submitting a review "
+                f"(iteration {iteration})"
+            )
+
+        tool_results = []
+        for block in response.content:
+            if block.type != "tool_use":
+                continue
+            tool_block = cast(ToolUseBlock, block)
+            if tool_block.name == "submit_review":
+                return PRReview.model_validate(tool_block.input)
+            with logfire.span(
+                "tool: {tool}", tool=tool_block.name, input=tool_block.input
+            ):
+                result = await tool_executors[tool_block.name](tool_block.input)
+            tool_results.append(
+                {
+                    "type": "tool_result",
+                    "tool_use_id": tool_block.id,
+                    "content": str(result),
+                }
+            )
+
+        if not tool_results:
+            raise RuntimeError(
+                f"No tool calls in response at iteration {iteration}, "
+                f"stop_reason={response.stop_reason}"
+            )
+
+        messages.append({"role": "user", "content": tool_results})
+
+    raise RuntimeError(f"Review agent exceeded max_iterations={max_iterations}")
+
+
 async def run_review(
     pr: GitHubPullRequest,
     repo: GitHubRepo,
     git_client: GitPlatformClient,
     triage_result: TriageResult,
     changed_files: list[ChangedFile],
+    anthropic_client: AsyncAnthropic,
     reviewer_role: str = "senior-dev",
 ) -> PRReview:
     """Run the appropriate review agent based on triage tags."""
     workspace, repo_slug = repo.full_name.split("/", 1)
+
+    async def _fetch_pr_diff(_input: dict[str, Any]) -> str:
+        return await git_client.get_pr_diff(workspace, repo_slug, pr.number)
+
+    async def _fetch_file_content(input_: dict[str, Any]) -> str:
+        return await git_client.get_file_content(
+            workspace, repo_slug, input_["file_path"], pr.head.sha
+        )
+
+    async def _search_repo_code(input_: dict[str, Any]) -> str:
+        results: list[CodeSearchResult] = await git_client.search_code(
+            workspace, repo_slug, input_["query"]
+        )
+        return json.dumps([r.model_dump() for r in results])
+
+    tool_executors: dict[str, Any] = {
+        "fetch_pr_diff": _fetch_pr_diff,
+        "fetch_file_content": _fetch_file_content,
+        "search_repo_code": _search_repo_code,
+    }
+
+    is_security = "security" in triage_result.tags
+    if is_security:
+        system = SECURITY_REVIEW_SYSTEM_PROMPT
+    else:
+        system = f"You are a {reviewer_role} reviewing a pull request.\n\n{GENERAL_REVIEW_SYSTEM_PROMPT}"
+
+    logger.info(
+        "Running %s review for PR #%d",
+        "security" if is_security else "general",
+        pr.number,
+    )
+
     deps = ReviewDeps(
         git_client=git_client,
         workspace=workspace,
@@ -176,20 +293,9 @@ async def run_review(
         reviewer_role=reviewer_role,
     )
 
-    agent = (
-        security_review_agent
-        if "security" in triage_result.tags
-        else general_review_agent
+    return await _run_review_loop(
+        system=system,
+        user_prompt=_format_review_prompt(deps),
+        tool_executors=tool_executors,
+        anthropic_client=anthropic_client,
     )
-
-    logger.info(
-        "Running %s review for PR #%d",
-        "security" if "security" in triage_result.tags else "general",
-        pr.number,
-    )
-
-    result = await agent.run(
-        _format_review_prompt(deps),
-        deps=deps,
-    )
-    return result.output  # ty: ignore[invalid-return-type]  # Pydantic AI generic
