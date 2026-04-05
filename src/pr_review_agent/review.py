@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import re
 from dataclasses import dataclass, field
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import logfire
 from anthropic import AsyncAnthropic
@@ -16,10 +18,17 @@ from pr_review_agent.models import (
     GitHubPullRequest,
     GitHubRepo,
     PRReview,
+    ReviewComment,
     TriageResult,
 )
 
 logger = logging.getLogger(__name__)
+
+_PARALLEL_THRESHOLD = 3  # fan out when PR touches this many files or more
+_FILE_REVIEW_CONCURRENCY = 4  # max simultaneous file-review subagents
+_FILE_REVIEW_MAX_ITERATIONS = 5  # per-file loop guard
+
+_RISK_ORDER: dict[str, int] = {"low": 0, "medium": 1, "high": 2, "critical": 3}
 
 
 def _slice_file_content(
@@ -35,6 +44,17 @@ def _slice_file_content(
     sliced = "".join(lines[s:e])
     header = f"# Lines {line_start or 1}-{min(e, total)} of {total}\n"
     return header + sliced
+
+
+def _split_diff_by_file(diff: str) -> dict[str, str]:
+    """Split a unified diff string into per-file snippets keyed by the b/ path."""
+    sections = re.split(r"(?=^diff --git )", diff, flags=re.MULTILINE)
+    result: dict[str, str] = {}
+    for section in sections:
+        m = re.match(r"diff --git a/\S+ b/(\S+)", section)
+        if m:
+            result[m.group(1)] = section
+    return result
 
 
 @dataclass
@@ -169,11 +189,41 @@ _SUBMIT_REVIEW_TOOL: ToolParam = cast(
     },
 )
 
+_SUBMIT_FILE_REVIEW_TOOL: ToolParam = cast(
+    "ToolParam",
+    {
+        "name": "submit_file_review",
+        "description": "Submit review comments for this individual file.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "comments": {
+                    "type": "array",
+                    "items": ReviewComment.model_json_schema(),
+                    "description": "Review comments for this file",
+                },
+                "risk_level": {
+                    "type": "string",
+                    "enum": ["low", "medium", "high", "critical"],
+                    "description": "Risk level of this file's changes",
+                },
+            },
+            "required": ["comments", "risk_level"],
+        },
+    },
+)
+
 _ALL_REVIEW_TOOLS: list[ToolParam] = [
     _FETCH_PR_DIFF_TOOL,
     _FETCH_FILE_CONTENT_TOOL,
     _SEARCH_REPO_CODE_TOOL,
     _SUBMIT_REVIEW_TOOL,
+]
+
+_FILE_REVIEW_TOOLS: list[ToolParam] = [
+    _FETCH_FILE_CONTENT_TOOL,
+    _SEARCH_REPO_CODE_TOOL,
+    _SUBMIT_FILE_REVIEW_TOOL,
 ]
 
 
@@ -263,6 +313,123 @@ async def _run_review_loop(
     raise RuntimeError(f"Review agent exceeded max_iterations={max_iterations}")
 
 
+async def _run_file_review_loop(
+    file: ChangedFile,
+    diff_snippet: str,
+    system: str,
+    tool_executors: dict[str, Any],
+    anthropic_client: AsyncAnthropic,
+) -> tuple[list[ReviewComment], Literal["low", "medium", "high", "critical"]]:
+    """Focused mini-loop reviewing a single file; returns comments and a per-file risk level."""
+    user_prompt = (
+        f"Review this file: {file.filename}\n"
+        f"Status: {file.status} (+{file.additions} -{file.deletions})\n\n"
+        f"Diff:\n{diff_snippet}\n\n"
+        f"Fetch file content with line ranges if you need more context. "
+        f"When done, call submit_file_review with your findings."
+    )
+    messages: list[Any] = [{"role": "user", "content": user_prompt}]
+
+    for iteration in range(_FILE_REVIEW_MAX_ITERATIONS):
+        response = await anthropic_client.messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=4096,
+            system=[
+                {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
+            ],
+            tools=_FILE_REVIEW_TOOLS,
+            messages=cast("list[MessageParam]", messages),
+        )
+
+        messages.append({"role": "assistant", "content": response.content})
+
+        if response.stop_reason == "max_tokens":
+            raise RuntimeError(
+                f"File review truncated for {file.filename} at iteration {iteration}"
+            )
+        if response.stop_reason == "end_turn":
+            raise RuntimeError(
+                f"File review agent stopped without submitting for {file.filename} "
+                f"(iteration {iteration})"
+            )
+
+        tool_results = []
+        for block in response.content:
+            if block.type != "tool_use":
+                continue
+            tool_block = cast(ToolUseBlock, block)
+            if tool_block.name == "submit_file_review":
+                raw_comments = cast("list[Any]", tool_block.input.get("comments", []))
+                comments = [ReviewComment.model_validate(c) for c in raw_comments]
+                risk: Literal["low", "medium", "high", "critical"] = cast(
+                    "Literal['low', 'medium', 'high', 'critical']",
+                    tool_block.input.get("risk_level", "low"),
+                )
+                return comments, risk
+            with logfire.span(
+                "tool: {tool}", tool=tool_block.name, input=tool_block.input
+            ):
+                result = await tool_executors[tool_block.name](tool_block.input)
+            tool_results.append(
+                {
+                    "type": "tool_result",
+                    "tool_use_id": tool_block.id,
+                    "content": str(result),
+                }
+            )
+
+        if not tool_results:
+            raise RuntimeError(
+                f"No tool calls in file review at iteration {iteration} "
+                f"for {file.filename}, stop_reason={response.stop_reason}"
+            )
+
+        messages.append({"role": "user", "content": tool_results})
+
+    raise RuntimeError(
+        f"File review exceeded {_FILE_REVIEW_MAX_ITERATIONS} iterations for {file.filename}"
+    )
+
+
+async def _aggregate_file_reviews(
+    all_comments: list[ReviewComment],
+    all_risk_levels: list[Literal["low", "medium", "high", "critical"]],
+    deps: ReviewDeps,
+    system: str,
+    anthropic_client: AsyncAnthropic,
+) -> PRReview:
+    """Single-turn forced call that synthesises per-file results into a full PRReview."""
+    overall_risk = max(
+        all_risk_levels, key=lambda r: _RISK_ORDER.get(r, 0), default="low"
+    )
+    comments_json = json.dumps([c.model_dump() for c in all_comments], indent=2)
+    user_prompt = (
+        f"PR #{deps.pr.number}: {deps.pr.title}\n"
+        f"Author: {deps.pr.user.login} | Repo: {deps.repo.full_name}\n"
+        f"Triage: {deps.triage.risk_level} risk, tags={deps.triage.tags}\n\n"
+        f"Per-file review is complete. Collected comments:\n{comments_json}\n\n"
+        f"Synthesise these into a final PR review. Overall risk is '{overall_risk}'. "
+        f"Provide a summary, architectural observations, learning points, and approve decision."
+    )
+    response = await anthropic_client.messages.create(
+        model="claude-sonnet-4-5",
+        max_tokens=4096,
+        system=[
+            {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
+        ],
+        tools=[_SUBMIT_REVIEW_TOOL],
+        tool_choice=cast("Any", {"type": "tool", "name": "submit_review"}),
+        messages=cast("list[MessageParam]", [{"role": "user", "content": user_prompt}]),
+    )
+    for block in response.content:
+        if block.type != "tool_use":
+            continue
+        tool_block = cast(ToolUseBlock, block)
+        if tool_block.name == "submit_review":
+            return PRReview.model_validate(tool_block.input)
+    raise RuntimeError("Aggregation call did not return submit_review")
+
+
 async def run_review(
     pr: GitHubPullRequest,
     repo: GitHubRepo,
@@ -299,7 +466,6 @@ async def run_review(
         return json.dumps([r.model_dump() for r in results])
 
     tool_executors: dict[str, Any] = {
-        "fetch_pr_diff": _fetch_pr_diff,
         "fetch_file_content": _fetch_file_content,
         "search_repo_code": _search_repo_code,
     }
@@ -328,9 +494,56 @@ async def run_review(
         reviewer_role=reviewer_role,
     )
 
+    if len(changed_files) >= _PARALLEL_THRESHOLD:
+        logger.info(
+            "Using parallel subagents for %d files (PR #%d)",
+            len(changed_files),
+            pr.number,
+        )
+        full_diff = await git_client.get_pr_diff(workspace, repo_slug, pr.number)
+        diff_by_file = _split_diff_by_file(full_diff)
+
+        semaphore = asyncio.Semaphore(_FILE_REVIEW_CONCURRENCY)
+
+        async def _review_one_file(
+            file: ChangedFile,
+        ) -> tuple[list[ReviewComment], Literal["low", "medium", "high", "critical"]]:
+            diff_snippet = diff_by_file.get(file.filename, "(diff not available)")
+            async with semaphore:
+                return await _run_file_review_loop(
+                    file=file,
+                    diff_snippet=diff_snippet,
+                    system=system,
+                    tool_executors=tool_executors,
+                    anthropic_client=anthropic_client,
+                )
+
+        file_results = await asyncio.gather(
+            *(_review_one_file(f) for f in changed_files)
+        )
+
+        all_comments: list[ReviewComment] = [
+            c for comments, _ in file_results for c in comments
+        ]
+        all_risk_levels: list[Literal["low", "medium", "high", "critical"]] = [
+            risk for _, risk in file_results
+        ]
+        return await _aggregate_file_reviews(
+            all_comments=all_comments,
+            all_risk_levels=all_risk_levels,
+            deps=deps,
+            system=system,
+            anthropic_client=anthropic_client,
+        )
+
+    # Single-loop path for small PRs (< _PARALLEL_THRESHOLD files)
+    single_loop_executors = {
+        "fetch_pr_diff": _fetch_pr_diff,
+        **tool_executors,
+    }
     return await _run_review_loop(
         system=system,
         user_prompt=_format_review_prompt(deps),
-        tool_executors=tool_executors,
+        tool_executors=single_loop_executors,
         anthropic_client=anthropic_client,
     )

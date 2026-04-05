@@ -13,9 +13,10 @@ from pr_review_agent.models import (
     GitHubRepo,
     GitHubUser,
     PRReview,
+    ReviewComment,
     TriageResult,
 )
-from pr_review_agent.review import _slice_file_content, run_review
+from pr_review_agent.review import _slice_file_content, _split_diff_by_file, run_review
 
 
 class FakeGitClient:
@@ -322,3 +323,191 @@ async def test_fetch_file_content_cache_hit(
 
     assert isinstance(result, PRReview)
     assert counting_client.get_file_content_call_count == 1
+
+
+# --- _split_diff_by_file unit tests ---
+
+
+def test_split_diff_by_file_single():
+    diff = (
+        "diff --git a/src/foo.py b/src/foo.py\n"
+        "index abc..def 100644\n"
+        "--- a/src/foo.py\n"
+        "+++ b/src/foo.py\n"
+        "@@ -1 +1 @@\n"
+        "+x = 1\n"
+    )
+    result = _split_diff_by_file(diff)
+    assert list(result.keys()) == ["src/foo.py"]
+    assert "src/foo.py" in result["src/foo.py"]
+
+
+def test_split_diff_by_file_multiple():
+    diff = (
+        "diff --git a/a.py b/a.py\n"
+        "+a\n"
+        "diff --git a/b.py b/b.py\n"
+        "+b\n"
+        "diff --git a/c.py b/c.py\n"
+        "+c\n"
+    )
+    result = _split_diff_by_file(diff)
+    assert set(result.keys()) == {"a.py", "b.py", "c.py"}
+    assert "+a" in result["a.py"]
+    assert "+b" in result["b.py"]
+
+
+def test_split_diff_by_file_empty():
+    assert _split_diff_by_file("") == {}
+
+
+# --- parallel subagent path tests ---
+
+
+@pytest.fixture
+def three_changed_files() -> list[ChangedFile]:
+    return [
+        ChangedFile(
+            filename=f"src/file{i}.py",
+            status="modified",
+            additions=5,
+            deletions=1,
+            changes=6,
+        )
+        for i in range(1, 4)
+    ]
+
+
+def _make_file_review_response(comments: list[ReviewComment] | None = None) -> object:
+    """Mock response where Claude calls submit_file_review."""
+    block = MagicMock()
+    block.type = "tool_use"
+    block.name = "submit_file_review"
+    block.input = {
+        "comments": [c.model_dump() for c in (comments or [])],
+        "risk_level": "low",
+    }
+    response = MagicMock()
+    response.content = [block]
+    response.stop_reason = "tool_use"
+    return response
+
+
+class FakeGitClientWithDiff(FakeGitClient):
+    async def get_pr_diff(self, workspace: str, repo_slug: str, pr_id: int) -> str:
+        return (
+            "diff --git a/src/file1.py b/src/file1.py\n+x=1\n"
+            "diff --git a/src/file2.py b/src/file2.py\n+y=2\n"
+            "diff --git a/src/file3.py b/src/file3.py\n+z=3\n"
+        )
+
+
+async def test_parallel_path_used_for_large_prs(
+    sample_pr: GitHubPullRequest,
+    sample_repo: GitHubRepo,
+    normal_triage: TriageResult,
+    minimal_review: PRReview,
+    three_changed_files: list[ChangedFile],
+):
+    """3+ changed files → fan-out: (N_files file-review calls) + 1 aggregation call."""
+    call_count = [0]
+
+    async def smart_side_effect(*args: object, **kwargs: object) -> object:
+        call_count[0] += 1
+        if call_count[0] <= 3:
+            return _make_file_review_response()
+        return _make_review_response(minimal_review)
+
+    mock_client = MagicMock()
+    mock_client.messages.create = AsyncMock(side_effect=smart_side_effect)
+
+    result = await run_review(
+        pr=sample_pr,
+        repo=sample_repo,
+        git_client=FakeGitClientWithDiff(),
+        triage_result=normal_triage,
+        changed_files=three_changed_files,
+        anthropic_client=mock_client,
+    )
+
+    assert isinstance(result, PRReview)
+    assert mock_client.messages.create.call_count == 4  # 3 file reviews + 1 aggregation
+
+
+async def test_small_pr_uses_single_loop(
+    sample_pr: GitHubPullRequest,
+    sample_repo: GitHubRepo,
+    sample_changed_files: list[ChangedFile],  # 1 file
+    normal_triage: TriageResult,
+    minimal_review: PRReview,
+):
+    """Fewer than 3 files → single agentic loop path (existing behaviour)."""
+    mock_client = MagicMock()
+    mock_client.messages.create = AsyncMock(
+        return_value=_make_review_response(minimal_review)
+    )
+
+    result = await run_review(
+        pr=sample_pr,
+        repo=sample_repo,
+        git_client=FakeGitClient(),
+        triage_result=normal_triage,
+        changed_files=sample_changed_files,
+        anthropic_client=mock_client,
+    )
+
+    assert isinstance(result, PRReview)
+    assert mock_client.messages.create.call_count == 1
+
+
+async def test_parallel_path_aggregates_comments(
+    sample_pr: GitHubPullRequest,
+    sample_repo: GitHubRepo,
+    normal_triage: TriageResult,
+    three_changed_files: list[ChangedFile],
+):
+    """Comments returned by file subagents are passed to the aggregation call."""
+    per_file_comment = ReviewComment(
+        file_path="src/file1.py",
+        line_start=1,
+        severity="warning",
+        category="naming",
+        comment="Poor name",
+    )
+    aggregated_review = PRReview(
+        summary="3 files reviewed",
+        risk_level="low",
+        comments=[per_file_comment] * 3,
+        approve=True,
+    )
+
+    call_count = [0]
+    aggregation_user_message: str = ""
+
+    async def smart_side_effect(*args: object, **kwargs: object) -> object:
+        call_count[0] += 1
+        if call_count[0] <= 3:
+            return _make_file_review_response(comments=[per_file_comment])
+        # Capture the user message sent to the aggregation call
+        nonlocal aggregation_user_message
+        messages = cast(list, kwargs.get("messages", []))
+        if messages:
+            aggregation_user_message = str(cast(dict, messages[0]).get("content", ""))
+        return _make_review_response(aggregated_review)
+
+    mock_client = MagicMock()
+    mock_client.messages.create = AsyncMock(side_effect=smart_side_effect)
+
+    result = await run_review(
+        pr=sample_pr,
+        repo=sample_repo,
+        git_client=FakeGitClientWithDiff(),
+        triage_result=normal_triage,
+        changed_files=three_changed_files,
+        anthropic_client=mock_client,
+    )
+
+    assert isinstance(result, PRReview)
+    assert len(result.comments) == 3
+    # Aggregation prompt contains comment data collected from subagents
+    assert "Poor name" in aggregation_user_message
