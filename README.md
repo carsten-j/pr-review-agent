@@ -94,7 +94,7 @@ Navigate to your test repo (e.g., `carsten-j/pr-review-test-repo`):
 ### 2. Configure the webhook
 
 | Setting | Value |
-|---------|-------|
+| ------- | ----- |
 | **Payload URL** | `https://<your-ngrok-url>/webhook/github` |
 | **Content type** | `application/json` |
 | **Secret** | The same value you set in `.env` as `GITHUB_WEBHOOK_SECRET` |
@@ -147,7 +147,7 @@ Requires `ANTHROPIC_API_KEY` to be set in your environment.
 
 ## Architecture
 
-```
+```text
 src/pr_review_agent/
 ├── main.py            # FastAPI app — webhook endpoint, settings, Logfire setup, background pipeline
 ├── models.py          # Pydantic models for GitHub payloads, triage, and review output
@@ -168,14 +168,49 @@ src/pr_review_agent/
 
 ### Pipeline flow
 
-1. GitHub sends a `pull_request` webhook event
-2. The webhook handler validates the signature and filters for `action: opened`
-3. A background task is created via `asyncio.create_task` (webhook returns 200 immediately)
-4. The triage agent fetches changed files and assesses the PR, producing a `TriageResult`
-5. If `should_review` is false, the pipeline stops
-6. The review agent fetches changed files again, then based on triage tags either the security or general reviewer runs
-7. The review agent fetches the diff, reads files for context, and searches the codebase as needed
-8. The agent produces a structured `PRReview` with line-specific comments, which is logged
+```mermaid
+flowchart TD
+    GH[GitHub webhook\nPOST /webhook/github]
+    SIG{Valid\nsignature?}
+    ACT{action: opened\n+ pull_request?}
+    RET[Return 200]
+    BG[Background task]
+
+    TRIAGE["Triage agent — Claude Haiku 4.5\n─────────────────────────────\nget_pr_changed_files\nforce-call produce_triage_result\n→ TriageResult"]
+
+    SR{should_review?}
+    STOP([Stop — PR skipped])
+
+    SEC{security tag?}
+    SECAGENT["security_review_agent\n(Claude Sonnet 4.5)"]
+    GENAGENT["general_review_agent\n(Claude Sonnet 4.5)\npersona from REVIEWER_ROLE"]
+
+    subgraph LOOP ["Pydantic AI agentic loop"]
+        direction TB
+        TOOLS["fetch_pr_diff\nfetch_file_content\nsearch_repo_code"]
+        DONE{PRReview\nreturned?}
+    end
+
+    POST["post_review_comments\n→ GitHub PR review\n(APPROVE / REQUEST_CHANGES\n+ inline comments)"]
+
+    GH --> SIG
+    SIG -- No --> RET
+    SIG -- Yes --> ACT
+    ACT -- No --> RET
+    ACT -- Yes --> RET & BG
+
+    BG --> TRIAGE
+    TRIAGE --> SR
+    SR -- No --> STOP
+    SR -- Yes --> SEC
+
+    SEC -- Yes --> SECAGENT --> LOOP
+    SEC -- No --> GENAGENT --> LOOP
+
+    TOOLS --> DONE
+    DONE -- No\nfeed results back --> TOOLS
+    DONE -- Yes --> POST
+```
 
 ### Triage output
 
@@ -203,6 +238,7 @@ The review agent produces a `PRReview` with:
 The agent is instrumented with [Logfire](https://logfire.pydantic.dev/). When `LOGFIRE_TOKEN` is set, every PR pipeline run appears as a single trace in the Logfire UI — triage agent run, tool calls, model requests, token usage, and the final review, all nested under a `review PR {repo}#{pr_number}` root span.
 
 To enable:
+
 1. Create a write token at logfire.pydantic.dev → project `pr-review-agent` → Settings → Write tokens
 2. Add `LOGFIRE_TOKEN=<your-token>` to `.env`
 3. Start the server — traces appear in Logfire automatically
