@@ -164,7 +164,7 @@ src/pr_review_agent/
 - **`git_platform.py`** — Defines the `GitPlatformClient` Protocol (abstract interface) and the `RepoDeps` dataclass that bundles `git_client`, `workspace`, `repo_slug`, and `pr_id`. Designed to support Bitbucket or other platforms in the future.
 - **`github_client.py`** — `GitHubClient` implementation of `GitPlatformClient`. Owns a shared `httpx.AsyncClient` for connection pooling. Supports a configurable `base_url` for GitHub Enterprise Server.
 - **`triage.py`** — Single-turn agent using Claude Haiku 4.5. Takes PR metadata and changed file list, produces a structured `TriageResult` by forcing a tool call with `tool_choice`. No agentic loop needed — one request, one structured response.
-- **`review.py`** — Agentic loop using Claude Sonnet 4.5. A security reviewer runs when triage tags include "security", otherwise a general reviewer runs (persona configured via `REVIEWER_ROLE` setting). Both use the same tools (`fetch_pr_diff`, `fetch_file_content`, `search_repo_code`) as closures, and loop until Claude calls `submit_review` with a structured `PRReview`. `fetch_file_content` supports optional `line_start`/`line_end` parameters so Claude can fetch only the lines relevant to a diff hunk, and results are memoized within a review run to avoid redundant API calls.
+- **`review.py`** — Agentic loop using Claude Sonnet 4.5. A security reviewer runs when triage tags include "security", otherwise a general reviewer runs (persona configured via `REVIEWER_ROLE` setting). For PRs with 3+ changed files, review work fans out across parallel per-file subagents (`asyncio.gather`, concurrency=4), each running a focused mini-loop (`_run_file_review_loop`, max 5 iterations) with the file's diff snippet embedded in the user message. A single aggregation call then synthesises the collected comments into a final `PRReview`. PRs with fewer than 3 files use a single agentic loop. `fetch_file_content` supports optional `line_start`/`line_end` for targeted hunk fetches, and results are memoized within a run.
 
 ### Pipeline flow
 
@@ -183,25 +183,25 @@ src/pr_review_agent/
 
 **Review (agentic loop):** Claude is given tools and loops until it calls `submit_review`. Each turn, tool results are fed back as user messages. The loop has a `max_iterations=20` guard and explicit checks for `end_turn` (agent stopped without submitting) and `max_tokens` (response truncated).
 
-Tools are defined as closures inside `run_review()`, capturing the request-scoped context (PR number, repo, SHA) without any dependency injection framework:
+Tools are defined as closures inside `run_review()`, capturing the request-scoped context (PR number, repo, SHA). For large PRs (3+ files), review work is parallelised:
 
 ```python
 async def run_review(pr, repo, git_client, ...):
-    _file_cache: dict[tuple[str, int | None, int | None], str] = {}
+    _file_cache = {}  # memoize fetch_file_content by (path, line_start, line_end)
 
-    async def _fetch_pr_diff(_input):
-        return await git_client.get_pr_diff(workspace, repo_slug, pr.number)
+    if len(changed_files) >= 3:
+        # Fan out: each file gets a focused mini-loop with its diff hunk pre-loaded
+        full_diff = await git_client.get_pr_diff(...)
+        diff_by_file = _split_diff_by_file(full_diff)
+        semaphore = asyncio.Semaphore(4)
 
-    async def _fetch_file_content(input_):
-        # Supports optional line_start/line_end for targeted fetches (~97% token
-        # reduction vs. full-file when reviewing a 50-line diff hunk in a 2000-line file).
-        # Results are memoized within the review run to avoid redundant API calls.
-        file_path, line_start, line_end = ...
-        if cache_key not in _file_cache:
-            raw = await git_client.get_file_content(...)
-            _file_cache[cache_key] = _slice_file_content(raw, line_start, line_end)
-        return _file_cache[cache_key]
-    ...
+        file_results = await asyncio.gather(
+            *(_review_one_file(f) for f in changed_files)
+        )
+        # One aggregation call synthesises comments into the final PRReview
+        return await _aggregate_file_reviews(all_comments, all_risk_levels, ...)
+    else:
+        return await _run_review_loop(...)  # single-loop path for < 3 files
 ```
 
 ### Triage output
@@ -239,5 +239,4 @@ Without `LOGFIRE_TOKEN` the app runs normally with no overhead.
 ## What's next
 
 - Post review comments as inline PR comments on GitHub
-- Parallel per-file subagents — fan out review work across files with `asyncio.gather` to reduce wall-clock latency on large PRs
 - Add Bitbucket support (the `GitPlatformClient` abstraction is already in place)
