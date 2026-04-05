@@ -164,7 +164,7 @@ src/pr_review_agent/
 - **`git_platform.py`** — Defines the `GitPlatformClient` Protocol (abstract interface) and the `RepoDeps` dataclass that bundles `git_client`, `workspace`, `repo_slug`, and `pr_id`. Designed to support Bitbucket or other platforms in the future.
 - **`github_client.py`** — `GitHubClient` implementation of `GitPlatformClient`. Owns a shared `httpx.AsyncClient` for connection pooling. Supports a configurable `base_url` for GitHub Enterprise Server.
 - **`triage.py`** — Single-turn agent using Claude Haiku 4.5. Takes PR metadata and changed file list, produces a structured `TriageResult` by forcing a tool call with `tool_choice`. No agentic loop needed — one request, one structured response.
-- **`review.py`** — Agentic loop using Claude Sonnet 4.5. A security reviewer runs when triage tags include "security", otherwise a general reviewer runs (persona configured via `REVIEWER_ROLE` setting). Both use the same tools (`fetch_pr_diff`, `fetch_file_content`, `search_repo_code`) as closures, and loop until Claude calls `submit_review` with a structured `PRReview`.
+- **`review.py`** — Agentic loop using Claude Sonnet 4.5. A security reviewer runs when triage tags include "security", otherwise a general reviewer runs (persona configured via `REVIEWER_ROLE` setting). Both use the same tools (`fetch_pr_diff`, `fetch_file_content`, `search_repo_code`) as closures, and loop until Claude calls `submit_review` with a structured `PRReview`. `fetch_file_content` supports optional `line_start`/`line_end` parameters so Claude can fetch only the lines relevant to a diff hunk, and results are memoized within a review run to avoid redundant API calls.
 
 ### Pipeline flow
 
@@ -187,13 +187,20 @@ Tools are defined as closures inside `run_review()`, capturing the request-scope
 
 ```python
 async def run_review(pr, repo, git_client, ...):
+    _file_cache: dict[tuple[str, int | None, int | None], str] = {}
+
     async def _fetch_pr_diff(_input):
         return await git_client.get_pr_diff(workspace, repo_slug, pr.number)
 
     async def _fetch_file_content(input_):
-        return await git_client.get_file_content(
-            workspace, repo_slug, input_["file_path"], pr.head.sha
-        )
+        # Supports optional line_start/line_end for targeted fetches (~97% token
+        # reduction vs. full-file when reviewing a 50-line diff hunk in a 2000-line file).
+        # Results are memoized within the review run to avoid redundant API calls.
+        file_path, line_start, line_end = ...
+        if cache_key not in _file_cache:
+            raw = await git_client.get_file_content(...)
+            _file_cache[cache_key] = _slice_file_content(raw, line_start, line_end)
+        return _file_cache[cache_key]
     ...
 ```
 
@@ -232,4 +239,5 @@ Without `LOGFIRE_TOKEN` the app runs normally with no overhead.
 ## What's next
 
 - Post review comments as inline PR comments on GitHub
+- Parallel per-file subagents — fan out review work across files with `asyncio.gather` to reduce wall-clock latency on large PRs
 - Add Bitbucket support (the `GitPlatformClient` abstraction is already in place)

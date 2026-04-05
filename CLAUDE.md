@@ -36,7 +36,7 @@ FastAPI webhook receiver → triage agent → review agent pipeline, using the r
 
 **Triage (single-turn):** `triage.py` makes one `messages.create()` call with `tool_choice={"type": "tool", "name": "produce_triage_result"}` to force a structured `TriageResult` response. No loop needed.
 
-**Review (agentic loop):** `review.py` runs `_run_review_loop()` which loops until Claude calls `submit_review`. Tools (`fetch_pr_diff`, `fetch_file_content`, `search_repo_code`) are closures over the call-scoped context (PR, repo, SHA). A security reviewer runs when triage tags include "security", otherwise a general reviewer runs (persona set via `REVIEWER_ROLE` setting). Guards: `max_iterations=20`, explicit checks for `end_turn` and `max_tokens` stop reasons.
+**Review (agentic loop):** `review.py` runs `_run_review_loop()` which loops until Claude calls `submit_review`. Tools (`fetch_pr_diff`, `fetch_file_content`, `search_repo_code`) are closures over the call-scoped context (PR, repo, SHA). A security reviewer runs when triage tags include "security", otherwise a general reviewer runs (persona set via `REVIEWER_ROLE` setting). Guards: `max_iterations=20`, explicit checks for `end_turn` and `max_tokens` stop reasons. `fetch_file_content` accepts optional `line_start`/`line_end` (1-indexed, inclusive) sliced via `_slice_file_content()`, and results are memoized in `_file_cache` keyed on `(file_path, line_start, line_end)` to avoid redundant API calls within one review run.
 
 **Client injection:** `AsyncAnthropic()` is created once in `_run_triage_background` in `main.py` and passed to both `run_triage()` and `run_review()`. Tests inject a `MagicMock` instead.
 
