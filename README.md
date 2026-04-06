@@ -1,15 +1,16 @@
 # PR Review Agent
 
-A GitHub PR review agent powered by Pydantic AI and Anthropic. A FastAPI webhook receiver that detects new pull requests on GitHub, triages them using Claude Haiku 4.5, and runs an automated code review using Claude Sonnet 4.5.
+A PR review agent powered by Pydantic AI and Anthropic. A FastAPI webhook receiver that detects new pull requests on GitHub or Bitbucket, triages them using Claude Haiku 4.5, and runs an automated code review using Claude Sonnet 4.5.
 
 ## Prerequisites
 
 - Python 3.12+
 - [uv](https://docs.astral.sh/uv/) — fast Python package manager
-- A [GitHub](https://github.com) account
-- A GitHub personal access token (needs `public_repo` scope, or `repo` for private repos)
+- A [GitHub](https://github.com) account **or** a [Bitbucket](https://bitbucket.org) account (or both)
+- A GitHub personal access token (needs `public_repo` scope, or `repo` for private repos) — if using GitHub
+- A Bitbucket username and [app password](https://support.atlassian.com/bitbucket-cloud/docs/app-passwords/) — if using Bitbucket
 - An [Anthropic](https://console.anthropic.com/) API key
-- [ngrok](https://ngrok.com) — for exposing your local server to GitHub webhooks
+- [ngrok](https://ngrok.com) — for exposing your local server to webhooks
 
 ## Quick start
 
@@ -24,12 +25,19 @@ uv sync
 # Create your .env file
 cp .env.example .env
 # Edit .env and set:
-#   GITHUB_WEBHOOK_SECRET — a strong random value (used for both .env and GitHub webhook config)
-#     Generate one with: python -c "import secrets; print(secrets.token_hex(32))"
 #   ANTHROPIC_API_KEY — your Anthropic API key
-#   GITHUB_TOKEN — a GitHub personal access token
 #   REVIEWER_ROLE — reviewer persona for the general agent (default: senior-dev)
 #   LOGFIRE_TOKEN — (optional) write token for Logfire observability
+#
+#   GitHub (if using GitHub):
+#   GITHUB_WEBHOOK_SECRET — a strong random value (used for both .env and GitHub webhook config)
+#     Generate one with: python -c "import secrets; print(secrets.token_hex(32))"
+#   GITHUB_TOKEN — a GitHub personal access token
+#
+#   Bitbucket (if using Bitbucket):
+#   BITBUCKET_WEBHOOK_SECRET — a strong random value matching your Bitbucket webhook config
+#   BITBUCKET_USERNAME — your Bitbucket username
+#   BITBUCKET_APP_PASSWORD — a Bitbucket app password with pull request read/write scope
 
 # Start the server
 uv run uvicorn pr_review_agent.main:app --reload
@@ -109,6 +117,32 @@ Navigate to your test repo (e.g., `carsten-j/pr-review-test-repo`):
 
 Click **Add webhook**. GitHub will send a `ping` event — you'll see it logged as an ignored event (since we only process `pull_request` events), which confirms the connection works.
 
+## Bitbucket webhook configuration
+
+### 1. Go to your repo's webhook settings
+
+Navigate to your test repo on Bitbucket:
+
+**Repository settings** → **Webhooks** → **Add webhook**
+
+### 2. Configure the webhook
+
+| Setting | Value |
+| ------- | ----- |
+| **URL** | `https://<your-ngrok-url>/webhook/bitbucket` |
+| **Secret** | The same value you set in `.env` as `BITBUCKET_WEBHOOK_SECRET` |
+
+### 3. Select triggers
+
+- Choose **"Choose from a full list of triggers"**
+- Under **Pull Request**, check **Created** only
+
+### 4. Save
+
+Click **Save**. Bitbucket will deliver a `pullrequest:created` event when a new PR is opened.
+
+> **Note:** Bitbucket code search (`search_repo_code` tool) requires a Premium workspace plan. On Standard/Free plans the agent degrades gracefully — code search returns empty results and the review continues without it.
+
 ## Testing
 
 ### Run automated tests
@@ -122,7 +156,11 @@ uv run pytest tests/ -v
 With the server running:
 
 ```bash
+# Simulate a GitHub PR webhook (default)
 uv run python scripts/simulate_webhook.py
+
+# Simulate a Bitbucket PR webhook
+uv run python scripts/simulate_webhook.py --platform bitbucket
 ```
 
 This sends a fake PR webhook with a valid HMAC signature to your local server.
@@ -180,20 +218,22 @@ async def triage_task(inputs: TriageInputs) -> TriageResult:
 
 ```text
 src/pr_review_agent/
-├── main.py            # FastAPI app — webhook endpoint, settings, Logfire setup, background pipeline
-├── models.py          # Pydantic models for GitHub payloads, triage, and review output
-├── security.py        # HMAC-SHA256 signature verification
-├── git_platform.py    # GitPlatformClient protocol and RepoDeps dataclass
-├── github_client.py   # GitHubClient — implements GitPlatformClient via httpx
-├── triage.py          # Pydantic AI triage agent (Claude Haiku 4.5)
-└── review.py          # Code review agents — security + general (Claude Sonnet 4.5)
+├── main.py               # FastAPI app — webhook endpoints, settings, Logfire setup, background pipeline
+├── models.py             # Pydantic models for GitHub/Bitbucket payloads, domain objects, triage, and review output
+├── security.py           # HMAC-SHA256 signature verification (GitHub + Bitbucket)
+├── git_platform.py       # GitPlatformClient protocol and RepoDeps dataclass
+├── github_client.py      # GitHubClient — implements GitPlatformClient via httpx
+├── bitbucket_client.py   # BitbucketClient — implements GitPlatformClient via httpx (Basic auth)
+├── triage.py             # Pydantic AI triage agent (Claude Haiku 4.5)
+└── review.py             # Code review agents — security + general (Claude Sonnet 4.5)
 ```
 
-- **`main.py`** — Receives `POST /webhook/github`, verifies the signature, filters for `pull_request` events with `action: opened`, logs the PR details, and fires off a background pipeline (triage → review). Configures Logfire at startup via `logfire.configure()` and `logfire.instrument_pydantic_ai()`.
-- **`models.py`** — Typed Pydantic models for GitHub webhook payloads, changed files, `TriageResult`, and `PRReview` output schemas.
-- **`security.py`** — Verifies the `X-Hub-Signature-256` header using the shared secret. Implemented as a FastAPI dependency.
-- **`git_platform.py`** — Defines the `GitPlatformClient` Protocol (abstract interface) and the `RepoDeps` dataclass that bundles `git_client`, `workspace`, `repo_slug`, and `pr_id`. Designed to support Bitbucket or other platforms in the future.
+- **`main.py`** — Receives `POST /webhook/github` and `POST /webhook/bitbucket`, verifies signatures, filters for new PR events, logs the PR details, and fires off a background pipeline (triage → review). Instantiates the appropriate git client based on platform. Configures Logfire at startup.
+- **`models.py`** — Typed Pydantic models for GitHub and Bitbucket webhook payloads, platform-agnostic domain objects (`PullRequestInfo`, `RepoInfo`), `ChangedFile`, `TriageResult`, and `PRReview` output schemas.
+- **`security.py`** — Verifies `X-Hub-Signature-256` (GitHub) and `X-Hub-Signature` (Bitbucket) headers using HMAC-SHA256. Implemented as FastAPI dependencies.
+- **`git_platform.py`** — Defines the `GitPlatformClient` Protocol (abstract interface) and the `RepoDeps` dataclass that bundles `git_client`, `workspace`, `repo_slug`, and `pr_id`.
 - **`github_client.py`** — `GitHubClient` implementation of `GitPlatformClient`. Owns a shared `httpx.AsyncClient` for connection pooling. Supports a configurable `base_url` for GitHub Enterprise Server.
+- **`bitbucket_client.py`** — `BitbucketClient` implementation of `GitPlatformClient`. Uses HTTP Basic auth (username + app password). Degrades gracefully when code search is unavailable (Standard/Free plans).
 - **`triage.py`** — Pydantic AI agent using Claude Haiku 4.5. Takes PR metadata and changed file list, produces a structured `TriageResult` with should_review, priority, risk_level, reason, and tags. Uses `TriageDeps(RepoDeps)`.
 - **`review.py`** — Two Pydantic AI review agents using Claude Sonnet 4.5. A security reviewer runs when triage tags include "security", otherwise a general reviewer runs (persona configured via `REVIEWER_ROLE` setting). Both share the same tools (`fetch_pr_diff`, `fetch_file_content`, `search_repo_code`) and produce a structured `PRReview`. Uses `ReviewDeps(RepoDeps)`.
 
@@ -202,6 +242,7 @@ src/pr_review_agent/
 ```mermaid
 flowchart TD
     GH[GitHub webhook\nPOST /webhook/github]
+    BB[Bitbucket webhook\nPOST /webhook/bitbucket]
     SIG{Valid\nsignature?}
     ACT{action: opened\n+ pull_request?}
     RET[Return 200]
@@ -225,6 +266,7 @@ flowchart TD
     POST["post_review_comments\n→ GitHub PR review\n(APPROVE / REQUEST_CHANGES\n+ inline comments)"]
 
     GH --> SIG
+    BB --> SIG
     SIG -- No --> RET
     SIG -- Yes --> ACT
     ACT -- No --> RET
@@ -278,5 +320,6 @@ Without `LOGFIRE_TOKEN` the app runs normally with no overhead.
 
 ## What's next
 
-- Post review comments as inline PR comments on GitHub
-- Add Bitbucket support (the `GitPlatformClient` abstraction is already in place)
+- Human-in-the-loop: pause before posting reviews for manual approval
+- Extend evals with real PR diffs from both GitHub and Bitbucket repos
+- Support additional webhook events (e.g. `synchronize` / `pullrequest:updated`) to re-review on push

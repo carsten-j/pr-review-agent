@@ -9,9 +9,9 @@ from pr_review_agent.git_platform import GitPlatformClient, RepoDeps
 from pr_review_agent.models import (
     ChangedFile,
     CodeSearchResult,
-    GitHubPullRequest,
-    GitHubRepo,
     PRReview,
+    PullRequestInfo,
+    RepoInfo,
     TriageResult,
 )
 
@@ -20,8 +20,8 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class ReviewDeps(RepoDeps):
-    pr: GitHubPullRequest
-    repo: GitHubRepo
+    pr: PullRequestInfo
+    repo: RepoInfo
     changed_files: list[ChangedFile]
     triage: TriageResult
     reviewer_role: str = field(default="senior-dev")
@@ -94,7 +94,7 @@ async def fetch_file_content(ctx: RunContext[ReviewDeps], file_path: str) -> str
     """Fetch the full content of a file at the PR's head ref.
     Use this to see surrounding context beyond what's in the diff."""
     return await ctx.deps.git_client.get_file_content(
-        ctx.deps.workspace, ctx.deps.repo_slug, file_path, ctx.deps.pr.head.sha
+        ctx.deps.workspace, ctx.deps.repo_slug, file_path, ctx.deps.pr.head_sha
     )
 
 
@@ -141,9 +141,9 @@ def _format_review_prompt(deps: ReviewDeps) -> str:
     )
     return (
         f"PR #{deps.pr.number}: {deps.pr.title}\n"
-        f"Author: {deps.pr.user.login}\n"
+        f"Author: {deps.pr.author_login}\n"
         f"Repository: {deps.repo.full_name}\n"
-        f"Branch: {deps.pr.head.ref} -> {deps.pr.base.ref}\n"
+        f"Branch: {deps.pr.head_branch} -> {deps.pr.base_branch}\n"
         f"Description: {deps.pr.body or '(no description)'}\n\n"
         f"Triage assessment: {deps.triage.risk_level} risk, "
         f"priority={deps.triage.priority}, tags={deps.triage.tags}\n"
@@ -161,7 +161,7 @@ async def post_review_comments(
     pr_id: int,
     review: PRReview,
 ) -> None:
-    """Post a PRReview as a GitHub pull request review with inline comments."""
+    """Post a PRReview as pull request review comments."""
     event = "APPROVE" if review.approve else "REQUEST_CHANGES"
     comments = [
         {
@@ -180,8 +180,8 @@ async def post_review_comments(
 
 
 async def run_review(
-    pr: GitHubPullRequest,
-    repo: GitHubRepo,
+    pr: PullRequestInfo,
+    repo: RepoInfo,
     git_client: GitPlatformClient,
     triage_result: TriageResult,
     changed_files: list[ChangedFile],

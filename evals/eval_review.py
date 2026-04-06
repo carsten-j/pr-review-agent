@@ -12,11 +12,9 @@ from pydantic_evals.evaluators import Evaluator, EvaluatorContext
 from pr_review_agent.models import (
     ChangedFile,
     CodeSearchResult,
-    GitHubBranchRef,
-    GitHubPullRequest,
-    GitHubRepo,
-    GitHubUser,
     PRReview,
+    PullRequestInfo,
+    RepoInfo,
     TriageResult,
 )
 from pr_review_agent.review import run_review
@@ -68,8 +66,8 @@ class FakeGitClient:
 
 @dataclass
 class ReviewInputs:
-    pr: GitHubPullRequest
-    repo: GitHubRepo
+    pr: PullRequestInfo
+    repo: RepoInfo
     triage: TriageResult
     diff: str
     file_content: str
@@ -78,27 +76,20 @@ class ReviewInputs:
     expect_approval: bool = False
 
 
-def _make_pr(number: int, title: str, body: str = "") -> GitHubPullRequest:
-    return GitHubPullRequest(
+def _make_pr(number: int, title: str, body: str = "") -> PullRequestInfo:
+    return PullRequestInfo(
         number=number,
         title=title,
         body=body,
-        state="open",
-        user=GitHubUser(login="testuser", id=1),
+        author_login="testuser",
         html_url=f"https://github.com/carsten-j/test-repo/pull/{number}",
-        diff_url=f"https://github.com/carsten-j/test-repo/pull/{number}.diff",
-        head=GitHubBranchRef(ref="feature", sha="abc123"),
-        base=GitHubBranchRef(ref="main", sha="def456"),
-        created_at="2026-04-05T10:00:00Z",
-        updated_at="2026-04-05T10:00:00Z",
+        head_branch="feature",
+        head_sha="abc123",
+        base_branch="main",
     )
 
 
-SAMPLE_REPO = GitHubRepo(
-    full_name="carsten-j/test-repo",
-    clone_url="https://github.com/carsten-j/test-repo.git",
-    private=False,
-)
+SAMPLE_REPO = RepoInfo(full_name="carsten-j/test-repo", is_private=False)
 
 
 def _file(filename: str, additions: int = 20, deletions: int = 2) -> ChangedFile:

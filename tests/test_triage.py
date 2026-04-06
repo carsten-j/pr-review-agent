@@ -6,10 +6,8 @@ from pydantic_ai.models.test import TestModel
 from pr_review_agent.models import (
     ChangedFile,
     CodeSearchResult,
-    GitHubBranchRef,
-    GitHubPullRequest,
-    GitHubRepo,
-    GitHubUser,
+    PullRequestInfo,
+    RepoInfo,
     TriageResult,
 )
 from pr_review_agent.triage import run_triage, triage_agent
@@ -50,29 +48,22 @@ class FakeGitClient:
 
 
 @pytest.fixture
-def sample_pr() -> GitHubPullRequest:
-    return GitHubPullRequest(
+def sample_pr() -> PullRequestInfo:
+    return PullRequestInfo(
         number=42,
         title="Add feature X",
         body="This PR adds feature X",
-        state="open",
-        user=GitHubUser(login="testuser", id=12345),
+        author_login="testuser",
         html_url="https://github.com/carsten-j/test/pull/42",
-        diff_url="https://github.com/carsten-j/test/pull/42.diff",
-        head=GitHubBranchRef(ref="feature-x", sha="abc123"),
-        base=GitHubBranchRef(ref="main", sha="def456"),
-        created_at="2026-04-03T10:00:00Z",
-        updated_at="2026-04-03T10:00:00Z",
+        head_branch="feature-x",
+        head_sha="abc123",
+        base_branch="main",
     )
 
 
 @pytest.fixture
-def sample_repo() -> GitHubRepo:
-    return GitHubRepo(
-        full_name="carsten-j/test",
-        clone_url="https://github.com/carsten-j/test.git",
-        private=False,
-    )
+def sample_repo() -> RepoInfo:
+    return RepoInfo(full_name="carsten-j/test", is_private=False)
 
 
 @pytest.fixture
@@ -89,8 +80,8 @@ def sample_changed_files() -> list[ChangedFile]:
 
 
 async def test_triage_returns_structured_output(
-    sample_pr: GitHubPullRequest,
-    sample_repo: GitHubRepo,
+    sample_pr: PullRequestInfo,
+    sample_repo: RepoInfo,
     sample_changed_files: list[ChangedFile],
 ):
     """Test that the triage agent produces a valid TriageResult using TestModel."""

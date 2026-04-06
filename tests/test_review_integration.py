@@ -7,11 +7,9 @@ import pytest
 from pr_review_agent.models import (
     ChangedFile,
     CodeSearchResult,
-    GitHubBranchRef,
-    GitHubPullRequest,
-    GitHubRepo,
-    GitHubUser,
     PRReview,
+    PullRequestInfo,
+    RepoInfo,
     TriageResult,
 )
 from pr_review_agent.review import run_review
@@ -106,29 +104,22 @@ class FakeGitClient:
 
 
 @pytest.fixture
-def sample_pr() -> GitHubPullRequest:
-    return GitHubPullRequest(
+def sample_pr() -> PullRequestInfo:
+    return PullRequestInfo(
         number=7,
         title="Add JWT authentication",
         body="Replaces the hardcoded admin check with JWT-based auth.",
-        state="open",
-        user=GitHubUser(login="dev-alice", id=99),
+        author_login="dev-alice",
         html_url="https://github.com/acme/backend/pull/7",
-        diff_url="https://github.com/acme/backend/pull/7.diff",
-        head=GitHubBranchRef(ref="feat/jwt-auth", sha="aaa111"),
-        base=GitHubBranchRef(ref="main", sha="bbb222"),
-        created_at="2026-04-03T12:00:00Z",
-        updated_at="2026-04-03T12:00:00Z",
+        head_branch="feat/jwt-auth",
+        head_sha="aaa111",
+        base_branch="main",
     )
 
 
 @pytest.fixture
-def sample_repo() -> GitHubRepo:
-    return GitHubRepo(
-        full_name="acme/backend",
-        clone_url="https://github.com/acme/backend.git",
-        private=False,
-    )
+def sample_repo() -> RepoInfo:
+    return RepoInfo(full_name="acme/backend", is_private=False)
 
 
 @pytest.fixture
@@ -168,8 +159,8 @@ def general_triage() -> TriageResult:
 
 @pytest.mark.integration
 async def test_security_review_with_real_model(
-    sample_pr: GitHubPullRequest,
-    sample_repo: GitHubRepo,
+    sample_pr: PullRequestInfo,
+    sample_repo: RepoInfo,
     changed_files: list[ChangedFile],
     security_triage: TriageResult,
 ):
@@ -203,8 +194,8 @@ async def test_security_review_with_real_model(
 
 @pytest.mark.integration
 async def test_general_review_with_real_model(
-    sample_pr: GitHubPullRequest,
-    sample_repo: GitHubRepo,
+    sample_pr: PullRequestInfo,
+    sample_repo: RepoInfo,
     changed_files: list[ChangedFile],
     general_triage: TriageResult,
 ):

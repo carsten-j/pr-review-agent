@@ -8,8 +8,8 @@ from pydantic_ai import Agent
 from pr_review_agent.git_platform import GitPlatformClient, RepoDeps
 from pr_review_agent.models import (
     ChangedFile,
-    GitHubPullRequest,
-    GitHubRepo,
+    PullRequestInfo,
+    RepoInfo,
     TriageResult,
 )
 
@@ -18,13 +18,13 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class TriageDeps(RepoDeps):
-    pr: GitHubPullRequest
-    repo: GitHubRepo
+    pr: PullRequestInfo
+    repo: RepoInfo
     changed_files: list[ChangedFile]
 
 
 TRIAGE_SYSTEM_PROMPT = """\
-You are a pull request triage agent. Given metadata about a GitHub pull request \
+You are a pull request triage agent. Given metadata about a pull request \
 and the list of changed files, produce a triage assessment.
 
 Evaluate the following:
@@ -65,17 +65,17 @@ def _format_user_prompt(deps: TriageDeps) -> str:
     )
     return (
         f"PR #{deps.pr.number}: {deps.pr.title}\n"
-        f"Author: {deps.pr.user.login}\n"
+        f"Author: {deps.pr.author_login}\n"
         f"Repository: {deps.repo.full_name}\n"
-        f"Branch: {deps.pr.head.ref} -> {deps.pr.base.ref}\n"
+        f"Branch: {deps.pr.head_branch} -> {deps.pr.base_branch}\n"
         f"Description: {deps.pr.body or '(no description)'}\n\n"
         f"Changed files ({len(deps.changed_files)}):\n{files_summary}"
     )
 
 
 async def run_triage(
-    pr: GitHubPullRequest,
-    repo: GitHubRepo,
+    pr: PullRequestInfo,
+    repo: RepoInfo,
     git_client: GitPlatformClient,
 ) -> TriageResult:
     """Fetch changed files and run the triage agent."""

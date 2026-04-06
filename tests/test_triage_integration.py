@@ -7,10 +7,8 @@ import pytest
 from pr_review_agent.models import (
     ChangedFile,
     CodeSearchResult,
-    GitHubBranchRef,
-    GitHubPullRequest,
-    GitHubRepo,
-    GitHubUser,
+    PullRequestInfo,
+    RepoInfo,
     TriageResult,
 )
 from pr_review_agent.triage import run_triage
@@ -53,24 +51,21 @@ class FakeGitClient:
 
 
 @pytest.fixture
-def sample_pr() -> GitHubPullRequest:
-    return GitHubPullRequest(
+def sample_pr() -> PullRequestInfo:
+    return PullRequestInfo(
         number=1,
         title="Fix SQL injection vulnerability in user login",
         body="Parameterized all raw SQL queries in the auth module.",
-        state="open",
-        user=GitHubUser(login="securitybot", id=99999),
+        author_login="securitybot",
         html_url="https://github.com/example/repo/pull/1",
-        diff_url="https://github.com/example/repo/pull/1.diff",
-        head=GitHubBranchRef(ref="fix-sqli", sha="aaa111"),
-        base=GitHubBranchRef(ref="main", sha="bbb222"),
-        created_at="2026-04-03T10:00:00Z",
-        updated_at="2026-04-03T10:00:00Z",
+        head_branch="fix-sqli",
+        head_sha="aaa111",
+        base_branch="main",
     )
 
 
 async def test_real_triage(
-    sample_pr: GitHubPullRequest,
+    sample_pr: PullRequestInfo,
 ):
     """Integration test that calls real Anthropic API. Run with: pytest -m integration"""
     if not os.getenv("ANTHROPIC_API_KEY"):
@@ -86,11 +81,7 @@ async def test_real_triage(
         ),
     ]
 
-    repo = GitHubRepo(
-        full_name="example/repo",
-        clone_url="https://github.com/example/repo.git",
-        private=False,
-    )
+    repo = RepoInfo(full_name="example/repo", is_private=False)
     result = await run_triage(
         pr=sample_pr, repo=repo, git_client=FakeGitClient(sample_files)
     )

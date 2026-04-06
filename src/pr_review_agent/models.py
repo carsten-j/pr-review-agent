@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -41,6 +42,76 @@ class GitHubWebhookPayload(BaseModel):
     pull_request: GitHubPullRequest = Field(alias="pull_request")
     repository: GitHubRepo
     sender: GitHubUser
+
+
+# ---------------------------------------------------------------------------
+# Bitbucket webhook models
+# ---------------------------------------------------------------------------
+
+
+class BitbucketActor(BaseModel):
+    nickname: str
+    display_name: str
+
+
+class BitbucketBranch(BaseModel):
+    name: str
+
+
+class BitbucketCommit(BaseModel):
+    hash: str
+
+
+class BitbucketEndpoint(BaseModel):
+    branch: BitbucketBranch
+    commit: BitbucketCommit
+
+
+class BitbucketLinks(BaseModel):
+    html: dict  # {"href": "https://..."}
+
+
+class BitbucketPullRequest(BaseModel):
+    id: int
+    title: str
+    description: str | None = None
+    state: str
+    source: BitbucketEndpoint
+    destination: BitbucketEndpoint
+    links: BitbucketLinks
+
+
+class BitbucketRepo(BaseModel):
+    full_name: str
+    is_private: bool
+
+
+class BitbucketWebhookPayload(BaseModel):
+    actor: BitbucketActor
+    pullrequest: BitbucketPullRequest
+    repository: BitbucketRepo
+
+
+@dataclass
+class PullRequestInfo:
+    """Platform-agnostic pull request domain object."""
+
+    number: int
+    title: str
+    body: str | None
+    author_login: str
+    html_url: str
+    head_branch: str
+    head_sha: str
+    base_branch: str
+
+
+@dataclass
+class RepoInfo:
+    """Platform-agnostic repository domain object."""
+
+    full_name: str
+    is_private: bool
 
 
 class ChangedFile(BaseModel):
